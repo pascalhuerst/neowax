@@ -1,0 +1,46 @@
+[package]
+name = "neowax"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lazy_static = "1.4.0"
+egui = "0.24.1"
+eframe = "0.24.1"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+alsa = "0.9.1"
+anyhow = "1.0.97"
+libc = "0.2.171"
+ringbuf = "0.4.8"
+symphonia = { version = "0.5.3", features = ["mp3", "wav", "flac", "aac", "isomp4", "ogg", "vorbis", "aiff", "pcm"] }
+num-traits = "0.2.19"
+byteorder = "1.5.0"
+clap = { version = "4.5.1", features = ["derive"] }
+ctrlc = "3.4"
+id3 = "1.8.0"
+
+[[bin]]
+name = "neowax-ui"
+path = "src/bin/neowax_ui.rs"
+
+[package.metadata.deb]
+maintainer = "Pascal Huerst"
+description = "Vinyl timecode DJ player"
+license-file = ["LICENSE", "0"]
+depends = "libasound2, libc6"
+section = "sound"
+priority = "optional"
+assets = [
+    ["target/release/neowax-ui", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/neowax/", "644"],
+    ["assets/neowax.desktop", "usr/share/applications/", "644"],
+    ["assets/neowax-16.png", "usr/share/icons/hicolor/16x16/apps/neowax.png", "644"],
+    ["assets/neowax-32.png", "usr/share/icons/hicolor/32x32/apps/neowax.png", "644"],
+    ["assets/neowax-48.png", "usr/share/icons/hicolor/48x48/apps/neowax.png", "644"],
+    ["assets/neowax-64.png", "usr/share/icons/hicolor/64x64/apps/neowax.png", "644"],
+    ["assets/neowax-128.png", "usr/share/icons/hicolor/128x128/apps/neowax.png", "644"],
+    ["assets/neowax-256.png", "usr/share/icons/hicolor/256x256/apps/neowax.png", "644"],
+    ["assets/neowax-512.png", "usr/share/icons/hicolor/512x512/apps/neowax.png", "644"],
+    ["assets/neowax.svg", "usr/share/icons/hicolor/scalable/apps/neowax.svg", "644"],
+]

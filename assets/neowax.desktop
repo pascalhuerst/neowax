@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=neowax
+Comment=Vinyl timecode DJ player
+Exec=neowax-ui
+Icon=neowax
+Type=Application
+Categories=Audio;Music;
