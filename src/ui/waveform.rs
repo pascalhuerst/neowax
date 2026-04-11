@@ -2,11 +2,42 @@ use egui::{epaint::Mesh, Color32, Pos2, Rect, Response, Sense, Shape, Stroke, Ui
 use std::time::Duration;
 
 const OVERVIEW_HEIGHT: f32 = 112.0;
-const WAVEFORM_FILL: Color32 = Color32::from_rgb(30, 80, 160);
-const WAVEFORM_EDGE: Color32 = Color32::from_rgb(80, 170, 255);
 const CURSOR_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
 const BACKGROUND_COLOR: Color32 = Color32::from_rgb(12, 12, 18);
 const GRIDLINE_COLOR: Color32 = Color32::from_rgb(30, 30, 40);
+
+// Frequency band colors: amber/gold palette
+// Bass = deep amber, Mid = gold, High = warm white
+const FILL_LOW: [f32; 3] = [120.0, 55.0, 10.0];
+const FILL_MID: [f32; 3] = [150.0, 95.0, 20.0];
+const FILL_HIGH: [f32; 3] = [160.0, 125.0, 45.0];
+const EDGE_LOW: [f32; 3] = [200.0, 110.0, 30.0];
+const EDGE_MID: [f32; 3] = [240.0, 180.0, 60.0];
+const EDGE_HIGH: [f32; 3] = [255.0, 220.0, 130.0];
+
+fn band_color(low: f32, mid: f32, high: f32) -> (Color32, Color32) {
+    let total = low + mid + high;
+    if total < 1e-6 {
+        return (
+            Color32::from_rgb(150, 95, 20),
+            Color32::from_rgb(240, 180, 60),
+        );
+    }
+    let wl = low / total;
+    let wm = mid / total;
+    let wh = high / total;
+    let fill = Color32::from_rgb(
+        (FILL_LOW[0] * wl + FILL_MID[0] * wm + FILL_HIGH[0] * wh) as u8,
+        (FILL_LOW[1] * wl + FILL_MID[1] * wm + FILL_HIGH[1] * wh) as u8,
+        (FILL_LOW[2] * wl + FILL_MID[2] * wm + FILL_HIGH[2] * wh) as u8,
+    );
+    let edge = Color32::from_rgb(
+        (EDGE_LOW[0] * wl + EDGE_MID[0] * wm + EDGE_HIGH[0] * wh) as u8,
+        (EDGE_LOW[1] * wl + EDGE_MID[1] * wm + EDGE_HIGH[1] * wh) as u8,
+        (EDGE_LOW[2] * wl + EDGE_MID[2] * wm + EDGE_HIGH[2] * wh) as u8,
+    );
+    (fill, edge)
+}
 
 /// Pre-computed min/max at power-of-2 block sizes for fast waveform drawing.
 struct WaveformMipmap {
@@ -236,7 +267,9 @@ impl WaveformWidget {
         let use_mipmap = self.mipmap.is_some() && samples_per_pixel >= 8.0;
         let col_count = rect.width() as usize;
 
-        let mut columns: Vec<(f32, f32)> = Vec::with_capacity(col_count);
+        let has_bands = !self.band_low.is_empty();
+
+        let mut columns: Vec<(f32, f32, Color32, Color32)> = Vec::with_capacity(col_count);
         for x in 0..col_count {
             let s_start_f = start_sample_f + x as f64 * samples_per_pixel;
             let s_end_f = s_start_f + samples_per_pixel;
@@ -263,47 +296,70 @@ impl WaveformWidget {
                 (mn, mx)
             };
 
-            columns.push((min, max));
+            let (fill, edge) = if has_bands {
+                let band_end = s_end.min(self.band_low.len());
+                if s_start < band_end {
+                    let mut sum_low = 0.0f32;
+                    let mut sum_mid = 0.0f32;
+                    let mut sum_high = 0.0f32;
+                    for i in s_start..band_end {
+                        sum_low += self.band_low[i] * self.band_low[i];
+                        sum_mid += self.band_mid[i] * self.band_mid[i];
+                        sum_high += self.band_high[i] * self.band_high[i];
+                    }
+                    let n = (band_end - s_start) as f32;
+                    band_color((sum_low / n).sqrt(), (sum_mid / n).sqrt(), (sum_high / n).sqrt())
+                } else {
+                    band_color(0.0, 0.0, 0.0)
+                }
+            } else {
+                band_color(0.0, 0.0, 0.0)
+            };
+
+            columns.push((min, max, fill, edge));
         }
 
         if columns.is_empty() {
             return;
         }
 
-        // Build filled mesh
+        // Build filled mesh — each column gets its own quad for per-column color
         let mut mesh = Mesh::default();
         mesh.reserve_triangles(columns.len() * 2);
-        mesh.reserve_vertices(columns.len() * 2);
+        mesh.reserve_vertices(columns.len() * 4);
 
-        for (x, &(min, max)) in columns.iter().enumerate() {
+        for (x, &(min, max, fill, _)) in columns.iter().enumerate() {
             let px = rect.left() + x as f32;
+            let px_next = px + 1.0;
             let y_top = center_y - max * half_height;
             let y_bot = center_y - min * half_height;
-            mesh.colored_vertex(Pos2::new(px, y_top), WAVEFORM_FILL);
-            mesh.colored_vertex(Pos2::new(px, y_bot), WAVEFORM_FILL);
-        }
-
-        for x in 0..columns.len() - 1 {
-            let i = (x * 2) as u32;
-            mesh.add_triangle(i, i + 1, i + 2);
-            mesh.add_triangle(i + 1, i + 3, i + 2);
+            let base = mesh.vertices.len() as u32;
+            mesh.colored_vertex(Pos2::new(px, y_top), fill);
+            mesh.colored_vertex(Pos2::new(px, y_bot), fill);
+            mesh.colored_vertex(Pos2::new(px_next, y_top), fill);
+            mesh.colored_vertex(Pos2::new(px_next, y_bot), fill);
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base + 1, base + 3, base + 2);
         }
 
         painter.add(Shape::mesh(mesh));
 
-        // Contour lines
-        let top_points: Vec<Pos2> = columns
-            .iter()
-            .enumerate()
-            .map(|(x, &(_, max))| Pos2::new(rect.left() + x as f32, center_y - max * half_height))
-            .collect();
-        let bot_points: Vec<Pos2> = columns
-            .iter()
-            .enumerate()
-            .map(|(x, &(min, _))| Pos2::new(rect.left() + x as f32, center_y - min * half_height))
-            .collect();
-
-        painter.add(Shape::line(top_points, Stroke::new(1.0, WAVEFORM_EDGE)));
-        painter.add(Shape::line(bot_points, Stroke::new(1.0, WAVEFORM_EDGE)));
+        // Contour lines — draw per-segment to match column color
+        for x in 0..columns.len().saturating_sub(1) {
+            let (_, max_a, _, edge_a) = columns[x];
+            let (_, max_b, _, _) = columns[x + 1];
+            let xa = rect.left() + x as f32;
+            let xb = xa + 1.0;
+            painter.line_segment(
+                [Pos2::new(xa, center_y - max_a * half_height), Pos2::new(xb, center_y - max_b * half_height)],
+                Stroke::new(1.0, edge_a),
+            );
+            let (min_a, _, _, _) = columns[x];
+            let (min_b, _, _, _) = columns[x + 1];
+            painter.line_segment(
+                [Pos2::new(xa, center_y - min_a * half_height), Pos2::new(xb, center_y - min_b * half_height)],
+                Stroke::new(1.0, edge_a),
+            );
+        }
     }
 }

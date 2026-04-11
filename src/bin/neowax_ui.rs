@@ -329,11 +329,11 @@ impl NeowaxApp {
             let fill_height = bar_height * self.signal_quality;
             if fill_height > 0.0 {
                 let color = if self.signal_quality > 0.9 {
-                    Color32::from_rgb(0, 200, 0)
+                    Color32::from_rgb(240, 180, 60)
                 } else if self.signal_quality > 0.5 {
-                    Color32::from_rgb(200, 200, 0)
+                    Color32::from_rgb(200, 140, 30)
                 } else {
-                    Color32::from_rgb(200, 0, 0)
+                    Color32::from_rgb(160, 50, 20)
                 };
                 let fill_rect = egui::Rect::from_min_max(
                     egui::pos2(bar_rect.left(), bar_rect.bottom() - fill_height),
@@ -398,7 +398,7 @@ impl NeowaxApp {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(Self::format_time(elapsed))
-                    .color(Color32::from_rgb(60, 180, 255))
+                    .color(Color32::from_rgb(240, 180, 60))
                     .size(20.0)
                     .monospace(),
             );
@@ -406,7 +406,7 @@ impl NeowaxApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!("-{}", Self::format_time(remaining)))
-                        .color(Color32::from_rgb(60, 180, 255))
+                        .color(Color32::from_rgb(240, 180, 60))
                         .size(20.0)
                         .monospace(),
                 );
@@ -437,10 +437,10 @@ impl NeowaxApp {
                 [ui.available_width(), 32.0],
                 egui::Button::new(
                     RichText::new(label)
-                        .color(Color32::from_rgb(180, 180, 180))
+                        .color(Color32::from_rgb(200, 160, 60))
                         .size(14.0),
                 )
-                .fill(Color32::from_rgb(35, 35, 45))
+                .fill(Color32::from_rgb(35, 28, 15))
                 .rounding(4.0),
             );
             if btn.clicked() {
@@ -511,7 +511,7 @@ impl NeowaxApp {
         if points.len() >= 2 {
             painter.add(egui::Shape::line(
                 points,
-                egui::Stroke::new(1.5, Color32::from_rgb(60, 200, 60)),
+                egui::Stroke::new(1.5, Color32::from_rgb(240, 180, 60)),
             ));
         }
 
@@ -523,7 +523,7 @@ impl NeowaxApp {
                     egui::Align2::RIGHT_TOP,
                     format!("{:+.2}%", (last - 1.0) * 100.0),
                     egui::FontId::monospace(12.0),
-                    Color32::from_rgb(60, 200, 60),
+                    Color32::from_rgb(240, 180, 60),
                 );
             }
         }
@@ -549,7 +549,7 @@ impl NeowaxApp {
 
         ui.label(
             RichText::new("Library")
-                .color(Color32::from_rgb(200, 200, 200))
+                .color(Color32::from_rgb(240, 200, 130))
                 .size(20.0),
         );
         ui.add_space(4.0);
@@ -564,9 +564,9 @@ impl NeowaxApp {
                     back_selected,
                     RichText::new("[Back]")
                         .color(if back_selected {
-                            Color32::from_rgb(150, 200, 255)
+                            Color32::from_rgb(255, 220, 130)
                         } else {
-                            Color32::from_rgb(80, 140, 200)
+                            Color32::from_rgb(200, 160, 60)
                         })
                         .size(16.0),
                 );
@@ -586,7 +586,7 @@ impl NeowaxApp {
                     rescan_selected,
                     RichText::new("[Rescan]")
                         .color(if rescan_selected {
-                            Color32::from_rgb(255, 200, 100)
+                            Color32::from_rgb(255, 220, 130)
                         } else {
                             Color32::from_rgb(200, 160, 60)
                         })
@@ -614,9 +614,9 @@ impl NeowaxApp {
                             let prefix = if *open { "v " } else { "> " };
                             let text = format!("{}{}{}", indent, prefix, name);
                             let color = if is_selected {
-                                Color32::from_rgb(200, 180, 100)
+                                Color32::from_rgb(240, 180, 60)
                             } else {
-                                Color32::from_rgb(140, 130, 80)
+                                Color32::from_rgb(180, 130, 40)
                             };
                             let response = ui.selectable_label(
                                 is_selected,
@@ -648,13 +648,13 @@ impl NeowaxApp {
                             };
 
                             let color = if is_current && is_selected {
-                                Color32::from_rgb(0, 255, 0)
+                                Color32::from_rgb(255, 220, 130)
                             } else if is_current {
-                                Color32::from_rgb(0, 200, 0)
+                                Color32::from_rgb(240, 180, 60)
                             } else if is_selected {
-                                Color32::WHITE
+                                Color32::from_rgb(230, 210, 170)
                             } else {
-                                Color32::from_rgb(180, 180, 180)
+                                Color32::from_rgb(180, 170, 150)
                             };
 
                             let response = ui.selectable_label(
@@ -686,7 +686,7 @@ impl NeowaxApp {
             ui.add_space(SPACER);
             ui.label(
                 RichText::new(&self.status_message)
-                    .color(Color32::from_rgb(255, 80, 80))
+                    .color(Color32::from_rgb(200, 80, 30))
                     .size(16.0),
             );
         }
@@ -816,7 +816,7 @@ impl eframe::App for NeowaxApp {
                                 bar_rect.bottom(),
                             ),
                         );
-                        painter.rect_filled(fill_rect, 0.0, Color32::from_rgb(60, 140, 255));
+                        painter.rect_filled(fill_rect, 0.0, Color32::from_rgb(240, 180, 60));
                     }
                     ui.add_space(2.0);
                 }

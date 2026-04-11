@@ -32,8 +32,8 @@ impl Spinner {
         Self {
             size,
             monitor_data: None,
-            primary_color: egui::Color32::from_rgb(60, 140, 255),
-            secondary_color: egui::Color32::from_rgb(15, 35, 65),
+            primary_color: egui::Color32::from_rgb(240, 180, 60),
+            secondary_color: egui::Color32::from_rgb(40, 25, 8),
             angle: 0.0,
             vinyl_pitch: 0.0,
             engine_position: 0.0,
