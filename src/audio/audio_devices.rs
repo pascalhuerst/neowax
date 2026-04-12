@@ -2,10 +2,16 @@ use alsa::pcm::{Access, Format, HwParams};
 use alsa::{Direction, PCM};
 use anyhow::Result;
 
-/// Default playback buffer size in samples.
-/// Legacy xwax uses 240 (~4 periods at period_size=64).
-/// Must be >= 2 * period_size. ~4 periods is the sweet spot.
+/// Default playback buffer size in frames.
+/// 256 frames at 48kHz = ~5.3ms latency — good balance for vinyl control.
 const DEFAULT_PLAYBACK_BUFFER: i64 = 256;
+
+/// Capture buffer: large to avoid drops. 1024 frames at 48kHz = ~21ms.
+const CAPTURE_BUFFER: i64 = 1024;
+
+/// Target number of periods per buffer. 4 is the standard sweet spot:
+/// frequent enough wakeups without excessive interrupt overhead.
+const TARGET_PERIODS: i64 = 4;
 
 #[derive(Clone)]
 pub struct AlsaSettings {
@@ -14,17 +20,16 @@ pub struct AlsaSettings {
     pub num_input_channels: u32,
     pub num_output_channels: u32,
     pub sample_rate: u32,
-    /// Playback buffer size in samples (default: 240, matching legacy xwax)
+    /// Playback buffer size in frames (default: 256, ~5.3ms at 48kHz)
     pub buffer_size: Option<u32>,
     pub period_size: Option<u32>,
 }
 
-/// Configure a PCM device for capture: smallest period, largest buffer.
+/// Configure a PCM device for capture: large buffer, sensible period.
 fn configure_capture(
     pcm: &PCM,
     num_channels: u32,
     sample_rate: u32,
-    buffer_size: i64,
 ) -> Result<()> {
     let hwp = HwParams::any(pcm)?;
 
@@ -37,11 +42,12 @@ fn configure_capture(
 
     hwp.set_rate(sample_rate, alsa::ValueOr::Nearest)?;
 
-    // Smallest possible period for lowest latency wakeups
-    hwp.set_period_size_near(2, alsa::ValueOr::Nearest)?;
+    // Large capture buffer to avoid overruns
+    hwp.set_buffer_size_near(CAPTURE_BUFFER)?;
 
-    // Maximum capture buffer to minimize drops
-    hwp.set_buffer_size_near(buffer_size)?;
+    // Period = buffer / target_periods for reasonable wakeup frequency
+    let period = (CAPTURE_BUFFER / TARGET_PERIODS).max(2);
+    hwp.set_period_size_near(period, alsa::ValueOr::Nearest)?;
 
     pcm.hw_params(&hwp)?;
 
@@ -62,7 +68,7 @@ fn configure_capture(
     Ok(())
 }
 
-/// Configure a PCM device for playback: smallest period, tiny buffer.
+/// Configure a PCM device for playback: small buffer for low latency.
 fn configure_playback(
     pcm: &PCM,
     num_channels: u32,
@@ -80,21 +86,12 @@ fn configure_playback(
 
     hwp.set_rate(sample_rate, alsa::ValueOr::Nearest)?;
 
-    // Smallest possible period for lowest latency wakeups
-    hwp.set_period_size_near(2, alsa::ValueOr::Nearest)?;
-
     // Small playback buffer to keep latency low
-    match hwp.set_buffer_size(buffer_size) {
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(
-                "Buffer of {} samples failed ({}), trying nearest",
-                buffer_size,
-                e
-            );
-            hwp.set_buffer_size_near(buffer_size)?;
-        }
-    }
+    hwp.set_buffer_size_near(buffer_size)?;
+
+    // Period = buffer / target_periods
+    let period = (buffer_size / TARGET_PERIODS).max(2);
+    hwp.set_period_size_near(period, alsa::ValueOr::Nearest)?;
 
     pcm.hw_params(&hwp)?;
 
@@ -129,7 +126,6 @@ pub fn configure_audio_devices(settings: &AlsaSettings) -> Result<(PCM, PCM, usi
         &capture,
         settings.num_input_channels,
         settings.sample_rate,
-        pb_buffer,
     )?;
 
     tracing::info!("Configuring playback: {}", settings.output_device);
