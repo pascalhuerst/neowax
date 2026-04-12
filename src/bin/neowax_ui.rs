@@ -55,9 +55,13 @@ struct Args {
     #[arg(long)]
     phono: bool,
 
-    /// ALSA playback buffer size in samples
+    /// ALSA playback buffer size in frames (default: 256, ~5.3ms at 48kHz)
     #[arg(long)]
     buffer: Option<u32>,
+
+    /// ALSA capture buffer size in frames (default: 1024, ~21ms at 48kHz)
+    #[arg(long)]
+    capture_buffer: Option<u32>,
 }
 
 #[derive(PartialEq)]
@@ -881,6 +885,9 @@ fn main() -> Result<(), eframe::Error> {
     let mut engine = Engine::new(input_device, output_device, args.sample_rate);
     if let Some(buf) = args.buffer {
         engine.set_buffer_size(buf);
+    }
+    if let Some(buf) = args.capture_buffer {
+        engine.set_capture_buffer_size(buf);
     }
     let deck_state = engine.state.clone();
 
