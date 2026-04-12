@@ -1,5 +1,5 @@
 use super::audio_devices::{configure_audio_devices, AlsaSettings};
-use super::player::Player;
+use super::player::{Player, TimecodeState};
 use super::track::Track;
 use crate::timecode::{TimecodeDef, Timecoder};
 
@@ -17,7 +17,59 @@ const MONITOR_SIZE: i32 = 128;
 /// Update monitor data every N periods (reduces realtime thread overhead)
 const MONITOR_UPDATE_INTERVAL: u32 = 8;
 
-/// Shared state between the realtime audio thread and the main/UI thread.
+/// Lock-free timecoder snapshot: written by capture thread, read by playback thread.
+/// Cache-line aligned to avoid false sharing.
+#[repr(C, align(64))]
+struct TimecodeSnapshot {
+    pitch: AtomicU64,
+    position: AtomicI32,
+    when: AtomicU64,
+}
+
+impl TimecodeSnapshot {
+    fn new() -> Self {
+        Self {
+            pitch: AtomicU64::new(0f64.to_bits()),
+            position: AtomicI32::new(i32::MIN),
+            when: AtomicU64::new(0f64.to_bits()),
+        }
+    }
+
+    fn write(&self, timecoder: &Timecoder) {
+        self.pitch
+            .store(timecoder.get_pitch().to_bits(), Ordering::Relaxed);
+        match timecoder.get_position() {
+            Some((pos, when)) => {
+                self.when.store(when.to_bits(), Ordering::Relaxed);
+                // Position store last with Release so the reader sees pitch+when
+                self.position.store(pos, Ordering::Release);
+            }
+            None => {
+                self.position.store(i32::MIN, Ordering::Release);
+            }
+        }
+    }
+
+    fn read(&self, safe: u32, resolution: f64) -> TimecodeState {
+        // Position load with Acquire pairs with the Release store
+        let pos = self.position.load(Ordering::Acquire);
+        let pitch = f64::from_bits(self.pitch.load(Ordering::Relaxed));
+        let when = f64::from_bits(self.when.load(Ordering::Relaxed));
+        let position = if pos == i32::MIN {
+            None
+        } else {
+            Some((pos, when))
+        };
+        TimecodeState {
+            pitch,
+            position,
+            safe,
+            resolution,
+        }
+    }
+}
+
+/// Shared state between the realtime audio threads and the main/UI thread.
 /// Atomics for scalars, Mutex for monitor buffer (audio thread uses try_lock).
 pub struct DeckState {
     /// Elapsed position in track, seconds (f64 bits as u64)
@@ -100,9 +152,9 @@ impl Engine {
         self.capture_buffer_size = Some(size);
     }
 
-    /// Start the audio engine in a dedicated realtime thread.
+    /// Start the audio engine with separate capture and playback threads.
     ///
-    /// Returns the thread handle and a sender for loading new tracks at runtime.
+    /// Returns handles for both threads and a sender for loading new tracks.
     pub fn run(
         &self,
         running: Arc<AtomicBool>,
@@ -110,7 +162,13 @@ impl Engine {
         timecode_name: &str,
         speed: f64,
         phono: bool,
-    ) -> (std::thread::JoinHandle<()>, mpsc::Sender<TrackCommand>) {
+        capture_cpu: usize,
+        playback_cpu: usize,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::thread::JoinHandle<()>,
+        mpsc::Sender<TrackCommand>,
+    ) {
         let state = self.state.clone();
         let sample_rate = self.sample_rate;
         let input_device = self.input_device.clone();
@@ -121,144 +179,131 @@ impl Engine {
 
         let (track_tx, track_rx) = mpsc::channel::<TrackCommand>();
 
-        let handle = std::thread::spawn(move || {
-            super::realtime::set_thread_affinity(3);
+        // Shared between capture and playback threads
+        let snapshot = Arc::new(TimecodeSnapshot::new());
+
+        // Build timecoder on main thread to get constants before spawning
+        tracing::info!("Building timecode LUT for '{}'...", timecode_name);
+        let def = TimecodeDef::find_definition(&timecode_name)
+            .expect(&format!("Unknown timecode: {}", timecode_name));
+        let timecoder = Timecoder::new(def, speed, sample_rate, phono);
+        let tc_safe = timecoder.get_safe();
+        let tc_resolution = timecoder.get_resolution();
+
+        // Configure ALSA devices on main thread (avoids race conditions)
+        let alsa_settings = AlsaSettings {
+            input_device: input_device.clone(),
+            output_device: output_device.clone(),
+            num_input_channels: 2,
+            num_output_channels: 2,
+            sample_rate,
+            buffer_size,
+            capture_buffer_size,
+            period_size: None,
+        };
+
+        let (input_pcm, output_pcm, _) =
+            configure_audio_devices(&alsa_settings).expect("Failed to configure audio devices");
+
+        let capture_period = input_pcm
+            .hw_params_current()
+            .expect("capture hw params")
+            .get_period_size()
+            .expect("capture period") as usize;
+        let playback_period = output_pcm
+            .hw_params_current()
+            .expect("playback hw params")
+            .get_period_size()
+            .expect("playback period") as usize;
+
+        input_pcm.prepare().expect("capture prepare");
+        output_pcm.prepare().expect("playback prepare");
+        input_pcm.start().expect("capture start");
+
+        state.running.store(true, Ordering::SeqCst);
+
+        // Capture thread: reads timecode audio, decodes position+pitch
+        let cap_snapshot = snapshot.clone();
+        let cap_state = state.clone();
+        let cap_running = running.clone();
+
+        let capture_handle = std::thread::spawn(move || {
+            super::realtime::set_thread_affinity(capture_cpu);
             super::realtime::prioritize_thread();
 
-            let result = run_realtime_loop(
-                &input_device,
-                &output_device,
-                sample_rate,
-                &timecode_name,
-                speed,
-                phono,
-                buffer_size,
-                capture_buffer_size,
-                initial_track,
-                track_rx,
-                &state,
-                &running,
-            );
-
-            if let Err(e) = result {
-                tracing::error!("Audio engine error: {}", e);
+            if let Err(e) = run_capture_loop(
+                input_pcm,
+                timecoder,
+                capture_period,
+                &cap_snapshot,
+                &cap_state,
+                &cap_running,
+            ) {
+                tracing::error!("Capture thread error: {}", e);
             }
-            state.running.store(false, Ordering::SeqCst);
-            tracing::info!("Audio engine stopped");
+            cap_state.running.store(false, Ordering::SeqCst);
+            tracing::info!("Capture thread stopped");
         });
 
-        (handle, track_tx)
+        // Playback thread: generates audio from track + timecode snapshot
+        let pb_snapshot = snapshot;
+        let pb_state = state;
+        let pb_running = running;
+
+        let playback_handle = std::thread::spawn(move || {
+            super::realtime::set_thread_affinity(playback_cpu);
+            super::realtime::prioritize_thread();
+
+            if let Err(e) = run_playback_loop(
+                output_pcm,
+                sample_rate,
+                playback_period,
+                initial_track,
+                track_rx,
+                tc_safe,
+                tc_resolution,
+                &pb_snapshot,
+                &pb_state,
+                &pb_running,
+            ) {
+                tracing::error!("Playback thread error: {}", e);
+            }
+            pb_state.running.store(false, Ordering::SeqCst);
+            tracing::info!("Playback thread stopped");
+        });
+
+        (capture_handle, playback_handle, track_tx)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_realtime_loop(
-    input_device: &str,
-    output_device: &str,
-    sample_rate: u32,
-    timecode_name: &str,
-    speed: f64,
-    phono: bool,
-    buffer_size: Option<u32>,
-    capture_buffer_size: Option<u32>,
-    initial_track: Option<Arc<Track>>,
-    track_rx: mpsc::Receiver<TrackCommand>,
+fn run_capture_loop(
+    input_pcm: alsa::PCM,
+    mut timecoder: Timecoder,
+    period_size: usize,
+    snapshot: &TimecodeSnapshot,
     state: &DeckState,
     running: &AtomicBool,
 ) -> Result<()> {
-    let alsa_settings = AlsaSettings {
-        input_device: input_device.to_string(),
-        output_device: output_device.to_string(),
-        num_input_channels: 2,
-        num_output_channels: 2,
-        sample_rate,
-        buffer_size,
-        capture_buffer_size,
-        period_size: None,
-    };
-
-    let (input_pcm, output_pcm, _) = configure_audio_devices(&alsa_settings)?;
-
-    let period_size = input_pcm.hw_params_current()?.get_period_size()? as usize;
-    let playback_buffer = output_pcm.hw_params_current()?.get_buffer_size()? as usize;
-
-    input_pcm.prepare()?;
-    output_pcm.prepare()?;
-
-    // Start capture immediately
-    input_pcm.start()?;
-
-    // Initialize timecoder
-    tracing::info!("Building timecode LUT for '{}'...", timecode_name);
-    let def = TimecodeDef::find_definition(timecode_name)
-        .ok_or_else(|| anyhow::anyhow!("Unknown timecode: {}", timecode_name))?;
-    let mut timecoder = Timecoder::new(def, speed, sample_rate, phono);
     timecoder.monitor_init(MONITOR_SIZE).ok();
 
-    // Initialize player
-    let mut player = Player::new(sample_rate);
-    if let Some(t) = initial_track {
-        player.set_track(t);
-    }
-
-    state.running.store(true, Ordering::SeqCst);
-
     let mut capture_buf = vec![0i16; period_size * 2];
-    let mut playback_buf = vec![0i16; period_size * 2];
     let mut period_counter: u32 = 0;
 
-    tracing::info!(
-        "Realtime loop started, period_size={}, playback_buffer={}",
-        period_size,
-        playback_buffer
-    );
+    tracing::info!("Capture loop started, period_size={}", period_size);
 
-    while running.load(Ordering::SeqCst) {
-        // Check for track commands (non-blocking)
-        if let Ok(cmd) = track_rx.try_recv() {
-            match cmd {
-                TrackCommand::Load(track) => {
-                    player.set_track(track);
-                    tracing::info!("Track loaded into player");
-                }
-                TrackCommand::Clear => {
-                    player.clear_track();
-                    tracing::info!("Track cleared");
-                }
-            }
-        }
-
-        // Capture: blocks until a period of audio is available
+    while running.load(Ordering::Relaxed) {
         match input_pcm.io_i16()?.readi(&mut capture_buf) {
             Ok(frames) => {
                 let n = frames as usize;
-
-                // Feed captured audio to timecoder (extracts position + pitch)
                 timecoder.submit(&capture_buf[..n * 2]);
 
-                // Generate resampled output from the loaded track
-                player.collect(&mut playback_buf[..n * 2], n, &timecoder);
+                // Publish timecoder state to playback thread
+                snapshot.write(&timecoder);
 
-                // Write output
-                match output_pcm.io_i16()?.writei(&playback_buf[..n * 2]) {
-                    Ok(_) => {}
-                    Err(e) if e.errno() == libc::EPIPE => {
-                        tracing::warn!("Playback underrun, recovering");
-                        output_pcm.prepare()?;
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-
-                // Publish scalar state (always, cheap)
-                state
-                    .elapsed
-                    .store(player.get_elapsed().to_bits(), Ordering::Relaxed);
-                state
-                    .pitch
-                    .store(player.get_effective_pitch().to_bits(), Ordering::Relaxed);
+                // Publish timecoder-side DeckState
                 state
                     .vinyl_pitch
-                    .store(player.pitch.to_bits(), Ordering::Relaxed);
+                    .store(timecoder.get_pitch().to_bits(), Ordering::Relaxed);
                 state
                     .valid_counter
                     .store(timecoder.get_valid_counter(), Ordering::Relaxed);
@@ -266,10 +311,8 @@ fn run_realtime_loop(
                 if let Some((pos, _)) = timecoder.get_position() {
                     state.timecode_pos.store(pos, Ordering::Relaxed);
                 }
-                // On transient dropout, hold last valid position instead of
-                // publishing i32::MIN which causes spinner/waveform stutter.
 
-                // Update monitor data periodically (uses try_lock to never block)
+                // Update monitor data periodically
                 period_counter += 1;
                 if period_counter % MONITOR_UPDATE_INTERVAL == 0 {
                     if let Ok(mut mon) = state.monitor.try_lock() {
@@ -286,6 +329,71 @@ fn run_realtime_loop(
             }
             Err(e) => return Err(e.into()),
         }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_playback_loop(
+    output_pcm: alsa::PCM,
+    sample_rate: u32,
+    period_size: usize,
+    initial_track: Option<Arc<Track>>,
+    track_rx: mpsc::Receiver<TrackCommand>,
+    tc_safe: u32,
+    tc_resolution: f64,
+    snapshot: &TimecodeSnapshot,
+    state: &DeckState,
+    running: &AtomicBool,
+) -> Result<()> {
+    let mut player = Player::new(sample_rate);
+    if let Some(t) = initial_track {
+        player.set_track(t);
+    }
+
+    let mut playback_buf = vec![0i16; period_size * 2];
+
+    tracing::info!("Playback loop started, period_size={}", period_size);
+
+    while running.load(Ordering::Relaxed) {
+        // Check for track commands (non-blocking)
+        if let Ok(cmd) = track_rx.try_recv() {
+            match cmd {
+                TrackCommand::Load(track) => {
+                    player.set_track(track);
+                    tracing::info!("Track loaded into player");
+                }
+                TrackCommand::Clear => {
+                    player.clear_track();
+                    tracing::info!("Track cleared");
+                }
+            }
+        }
+
+        // Read latest timecoder state
+        let tc_state = snapshot.read(tc_safe, tc_resolution);
+
+        // Generate audio
+        player.collect_with_state(&mut playback_buf, period_size, &tc_state);
+
+        // Write output
+        match output_pcm.io_i16()?.writei(&playback_buf) {
+            Ok(_) => {}
+            Err(e) if e.errno() == libc::EPIPE => {
+                tracing::warn!("Playback underrun, recovering");
+                output_pcm.prepare()?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+
+        // Publish player-side DeckState
+        state
+            .elapsed
+            .store(player.get_elapsed().to_bits(), Ordering::Relaxed);
+        state
+            .pitch
+            .store(player.get_effective_pitch().to_bits(), Ordering::Relaxed);
     }
 
     Ok(())

@@ -14,7 +14,7 @@ pub use channels::{
     InputChannel, OutputChannel, FRAMES_PER_BUFFER, MAX_AUDIO_BUFFERS, SAMPLES_PER_BUFFER,
 };
 pub use engine::*;
-pub use player::Player;
+pub use player::{Player, TimecodeState};
 pub use realtime_player::*;
 pub use track::Track;
 

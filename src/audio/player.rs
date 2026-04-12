@@ -2,6 +2,26 @@ use super::track::Track;
 use crate::timecode::Timecoder;
 use std::sync::Arc;
 
+/// Snapshot of timecoder state needed by the player for one period.
+/// Decouples the player from the Timecoder so they can live on different threads.
+pub struct TimecodeState {
+    pub pitch: f64,
+    pub position: Option<(i32, f64)>,
+    pub safe: u32,
+    pub resolution: f64,
+}
+
+impl TimecodeState {
+    pub fn from_timecoder(tc: &Timecoder) -> Self {
+        Self {
+            pitch: tc.get_pitch(),
+            position: tc.get_position(),
+            safe: tc.get_safe(),
+            resolution: tc.get_resolution(),
+        }
+    }
+}
+
 const PLAYER_CHANNELS: usize = 2;
 
 /// Time taken to reach sync with timecode position
@@ -114,19 +134,16 @@ impl Player {
         self.pitch.abs() > 0.01
     }
 
-    /// Synchronise to the position and speed given by the timecoder.
-    /// Uses absolute positioning: timecode position maps directly to track position.
-    /// Past the safe zone, keeps playing at current pitch without position sync.
-    fn sync_to_timecode(&mut self, timecoder: &Timecoder) {
-        self.pitch = timecoder.get_pitch();
+    /// Synchronise to the position and speed given by a timecode state snapshot.
+    fn sync_to_state(&mut self, state: &TimecodeState) {
+        self.pitch = state.pitch;
 
-        match timecoder.get_position() {
+        match state.position {
             Some((pos, when)) => {
-                if pos < 0 || pos as u32 > timecoder.get_safe() {
-                    // Past safe zone: keep playing at current pitch, no position sync
+                if pos < 0 || pos as u32 > state.safe {
                     self.target_position = f64::INFINITY;
                 } else {
-                    let tcpos = pos as f64 / timecoder.get_resolution();
+                    let tcpos = pos as f64 / state.resolution;
                     self.target_position = tcpos + self.pitch * when;
                 }
             }
@@ -213,28 +230,21 @@ impl Player {
         self.sample_dt * pitch * samples as f64
     }
 
-    /// Get a block of PCM audio data to send to the soundcard.
-    ///
-    /// This is the main function which retrieves audio for playback.
-    /// The clock of playback is decoupled from the clock of the timecode signal.
-    ///
-    /// `pcm` must have room for `samples * 2` i16 values (stereo).
-    pub fn collect(&mut self, pcm: &mut [i16], samples: usize, timecoder: &Timecoder) {
+    /// Get a block of PCM audio using a pre-built timecode state snapshot.
+    /// Used by the playback thread in the two-thread engine.
+    pub fn collect_with_state(&mut self, pcm: &mut [i16], samples: usize, state: &TimecodeState) {
         let dt = self.sample_dt * samples as f64;
 
-        self.sync_to_timecode(timecoder);
+        self.sync_to_state(state);
 
         if self.target_position.is_finite() {
             self.retarget();
             self.target_position = f64::INFINITY;
         } else {
-            // Without a known target, tend sync_pitch toward 1.0
             self.sync_pitch += dt / (SYNC_RC + dt) * (1.0 - self.sync_pitch);
         }
 
         let target_volume = (self.pitch.abs() * VOLUME).min(1.0);
-
-        // Sync pitch is applied post-filtering
         let pitch = self.pitch * self.sync_pitch;
 
         let r = match &self.track {
@@ -255,6 +265,13 @@ impl Player {
 
         self.position += r;
         self.volume = target_volume;
+    }
+
+    /// Get a block of PCM audio data to send to the soundcard.
+    /// Convenience wrapper that reads state directly from a Timecoder reference.
+    pub fn collect(&mut self, pcm: &mut [i16], samples: usize, timecoder: &Timecoder) {
+        let state = TimecodeState::from_timecoder(timecoder);
+        self.collect_with_state(pcm, samples, &state);
     }
 }
 

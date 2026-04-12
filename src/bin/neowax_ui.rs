@@ -62,6 +62,14 @@ struct Args {
     /// ALSA capture buffer size in frames (default: 1024, ~21ms at 48kHz)
     #[arg(long)]
     capture_buffer: Option<u32>,
+
+    /// CPU core to pin the capture thread to (default: 3)
+    #[arg(long, default_value_t = 3)]
+    capture_cpu: usize,
+
+    /// CPU core to pin the playback thread to (default: 2)
+    #[arg(long, default_value_t = 2)]
+    playback_cpu: usize,
 }
 
 #[derive(PartialEq)]
@@ -891,12 +899,14 @@ fn main() -> Result<(), eframe::Error> {
     }
     let deck_state = engine.state.clone();
 
-    let (engine_handle, track_sender) = engine.run(
+    let (capture_handle, playback_handle, track_sender) = engine.run(
         running.clone(),
         None,
         &args.timecode,
         args.speed,
         args.phono,
+        args.capture_cpu,
+        args.playback_cpu,
     );
 
     let timecode_resolution = TimecodeDef::find_definition(&args.timecode)
@@ -933,7 +943,8 @@ fn main() -> Result<(), eframe::Error> {
     let result = eframe::run_native("neowax", options, Box::new(|_cc| Box::new(app)));
 
     running.store(false, Ordering::SeqCst);
-    engine_handle.join().ok();
+    capture_handle.join().ok();
+    playback_handle.join().ok();
 
     result
 }
