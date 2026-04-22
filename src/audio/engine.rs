@@ -88,6 +88,12 @@ pub struct DeckState {
     pub monitor: Mutex<Vec<u8>>,
 }
 
+impl Default for DeckState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeckState {
     pub fn new() -> Self {
         Self {
@@ -155,6 +161,7 @@ impl Engine {
     /// Start the audio engine with separate capture and playback threads.
     ///
     /// Returns handles for both threads and a sender for loading new tracks.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         running: Arc<AtomicBool>,
@@ -185,7 +192,7 @@ impl Engine {
         // Build timecoder on main thread to get constants before spawning
         tracing::info!("Building timecode LUT for '{}'...", timecode_name);
         let def = TimecodeDef::find_definition(&timecode_name)
-            .expect(&format!("Unknown timecode: {}", timecode_name));
+            .unwrap_or_else(|| panic!("Unknown timecode: {}", timecode_name));
         let timecoder = Timecoder::new(def, speed, sample_rate, phono);
         let tc_safe = timecoder.get_safe();
         let tc_resolution = timecoder.get_resolution();
@@ -294,7 +301,7 @@ fn run_capture_loop(
     while running.load(Ordering::Relaxed) {
         match input_pcm.io_i16()?.readi(&mut capture_buf) {
             Ok(frames) => {
-                let n = frames as usize;
+                let n = frames;
                 timecoder.submit(&capture_buf[..n * 2]);
 
                 // Publish timecoder state to playback thread
@@ -314,7 +321,7 @@ fn run_capture_loop(
 
                 // Update monitor data periodically
                 period_counter += 1;
-                if period_counter % MONITOR_UPDATE_INTERVAL == 0 {
+                if period_counter.is_multiple_of(MONITOR_UPDATE_INTERVAL) {
                     if let Ok(mut mon) = state.monitor.try_lock() {
                         if let Some(data) = timecoder.get_monitor() {
                             *mon = data;

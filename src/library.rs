@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "wav", "ogg", "aac", "m4a", "opus", "aiff", "aif"];
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "flac", "wav", "ogg", "aac", "m4a", "opus", "aiff", "aif",
+];
 
 /// A node in the library tree: either a folder (with children) or an audio file.
 pub enum LibraryNode {
@@ -106,7 +108,7 @@ fn scan_dir_nodes(dir: &Path) -> Vec<LibraryNode> {
     nodes
 }
 
-fn sort_nodes(nodes: &mut Vec<LibraryNode>) {
+fn sort_nodes(nodes: &mut [LibraryNode]) {
     nodes.sort_by(|a, b| {
         let a_name = match a {
             LibraryNode::Folder { name, .. } => name,

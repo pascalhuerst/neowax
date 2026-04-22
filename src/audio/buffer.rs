@@ -9,6 +9,15 @@ where
     index: usize,
 }
 
+impl<T, const SAMPLES_PER_BUFFER: usize> Default for GenericAudioBuffer<T, SAMPLES_PER_BUFFER>
+where
+    T: Copy + Zero + NumCast,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, const SAMPLES_PER_BUFFER: usize> GenericAudioBuffer<T, SAMPLES_PER_BUFFER>
 where
     T: Copy + Zero + NumCast,

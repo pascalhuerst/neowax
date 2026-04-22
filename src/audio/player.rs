@@ -45,9 +45,7 @@ fn dither() -> f64 {
         let bit = (x ^ (x >> 1) ^ (x >> 21) ^ (x >> 31)) & 1;
         x = (x << 1) | bit;
         s.set(x);
-        let v = (x & 0x0000_000f)
-            | ((x & 0x000f_0000) >> 12)
-            | ((x & 0x0f00_0000) >> 16);
+        let v = (x & 0x0000_000f) | ((x & 0x000f_0000) >> 12) | ((x & 0x0f00_0000) >> 16);
         v as f64 / 4096.0 - 0.5
     })
 }
@@ -174,7 +172,11 @@ impl Player {
         if diff.abs() > SKIP_THRESHOLD {
             // Large deviation (e.g. needle repositioned): jump directly
             self.position = self.target_position;
-            tracing::debug!("Seek to {:.2}s (elapsed {:.2}s)", self.position, self.position - self.offset);
+            tracing::debug!(
+                "Seek to {:.2}s (elapsed {:.2}s)",
+                self.position,
+                self.position - self.offset
+            );
         } else if self.pitch.abs() > SYNC_PITCH {
             // Small deviation: bend pitch to compensate
             let denom = diff / SYNC_TIME + self.pitch;
@@ -186,6 +188,7 @@ impl Player {
 
     /// Build a block of PCM audio, resampled from the track using cubic interpolation.
     /// Returns the number of seconds advanced in the source track.
+    #[allow(clippy::too_many_arguments)]
     fn build_pcm(
         &self,
         pcm: &mut [i16],
@@ -219,8 +222,7 @@ impl Player {
                 ];
 
                 let v = vol * cubic_interpolate(interp, f) + dither();
-                pcm[s * PLAYER_CHANNELS + c] =
-                    v.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+                pcm[s * PLAYER_CHANNELS + c] = v.clamp(i16::MIN as f64, i16::MAX as f64) as i16;
             }
 
             sample += step;
@@ -348,9 +350,18 @@ mod tests {
             }
         }
 
-        assert!(got_position, "Timecoder should find valid positions in the test data");
-        assert!(got_nonzero_pitch, "Player should have non-zero pitch when timecode is playing");
-        assert!(got_nonzero_output, "Player should produce non-silent audio output");
+        assert!(
+            got_position,
+            "Timecoder should find valid positions in the test data"
+        );
+        assert!(
+            got_nonzero_pitch,
+            "Player should have non-zero pitch when timecode is playing"
+        );
+        assert!(
+            got_nonzero_output,
+            "Player should produce non-silent audio output"
+        );
 
         // Player position should have advanced significantly (close to 60 seconds of timecode)
         let elapsed = player.get_elapsed();
@@ -373,7 +384,11 @@ mod tests {
 
         // Linear ramp: midpoint should be 1500
         let mid = cubic_interpolate([0, 1000, 2000, 3000], 0.5);
-        assert!((mid - 1500.0).abs() < 1.0, "midpoint of linear ramp: {}", mid);
+        assert!(
+            (mid - 1500.0).abs() < 1.0,
+            "midpoint of linear ramp: {}",
+            mid
+        );
 
         // Constant signal: should stay constant at any mu
         assert_eq!(cubic_interpolate([500, 500, 500, 500], 0.25), 500.0);
@@ -399,7 +414,10 @@ mod tests {
 
         // sync_pitch should be clamped, not inf/NaN
         assert!(player.sync_pitch.is_finite(), "sync_pitch should be finite");
-        assert!(player.sync_pitch >= 0.5 && player.sync_pitch <= 2.0,
-            "sync_pitch should be clamped, got {}", player.sync_pitch);
+        assert!(
+            player.sync_pitch >= 0.5 && player.sync_pitch <= 2.0,
+            "sync_pitch should be clamped, got {}",
+            player.sync_pitch
+        );
     }
 }

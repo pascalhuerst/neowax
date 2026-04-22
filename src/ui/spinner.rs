@@ -47,12 +47,7 @@ impl Spinner {
         self.monitor_data = data;
     }
 
-    pub fn update_position(
-        &mut self,
-        position: Option<i32>,
-        vinyl_pitch: f64,
-        resolution: f64,
-    ) {
+    pub fn update_position(&mut self, position: Option<i32>, vinyl_pitch: f64, resolution: f64) {
         self.resolution = resolution as f32;
         self.vinyl_pitch = vinyl_pitch as f32;
         if let Some(pos) = position {
@@ -83,7 +78,7 @@ impl Spinner {
         let mut error = target_angle - self.angle;
 
         // Wrap error to [-π, π] so correction takes the short way around
-        error = error % (2.0 * PI);
+        error %= 2.0 * PI;
         if error > PI {
             error -= 2.0 * PI;
         } else if error < -PI {
@@ -96,10 +91,8 @@ impl Spinner {
     pub fn ui(&mut self, ui: &mut egui::Ui) -> egui::Response {
         self.advance();
 
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(self.size, self.size),
-            egui::Sense::hover(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(self.size, self.size), egui::Sense::hover());
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
@@ -139,10 +132,7 @@ impl Spinner {
                     center.y + radius * self.angle.sin(),
                 );
 
-                painter.line_segment(
-                    [center, end],
-                    egui::Stroke::new(2.0, self.primary_color),
-                );
+                painter.line_segment([center, end], egui::Stroke::new(2.0, self.primary_color));
             }
         }
 

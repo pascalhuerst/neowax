@@ -5,8 +5,8 @@ mod timecoder;
 
 pub use lookup_table::Lut;
 pub use media_definition::TimecodeDef;
-pub use timecoder::{Timecoder, TimecoderChannel};
 pub use pitch::Pitch;
+pub use timecoder::{Timecoder, TimecoderChannel};
 
 // Constants used across the module
 pub(crate) const ZERO_THRESHOLD: i32 = 128 << 16;

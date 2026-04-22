@@ -103,13 +103,13 @@ impl WaveformMipmap {
         let block_size = 1 << (level + 1);
 
         let mip_start = start / block_size;
-        let mip_end = ((end + block_size - 1) / block_size).min(mip.len());
+        let mip_end = end.div_ceil(block_size).min(mip.len());
 
         let mut mn = 0.0f32;
         let mut mx = 0.0f32;
-        for i in mip_start..mip_end {
-            mn = mn.min(mip[i].0);
-            mx = mx.max(mip[i].1);
+        for block in &mip[mip_start..mip_end] {
+            mn = mn.min(block.0);
+            mx = mx.max(block.1);
         }
         (mn, mx)
     }
@@ -157,8 +157,7 @@ impl WaveformWidget {
         sample_rate: u32,
     ) {
         self.sample_rate = sample_rate;
-        self.duration =
-            Duration::from_secs_f64(samples.len() as f64 / self.sample_rate as f64);
+        self.duration = Duration::from_secs_f64(samples.len() as f64 / self.sample_rate as f64);
         self.mipmap = if samples.is_empty() {
             None
         } else {
@@ -193,10 +192,8 @@ impl WaveformWidget {
         let duration_secs = self.duration.as_secs_f64();
 
         // Overview waveform
-        let (overview_rect, overview_response) = ui.allocate_exact_size(
-            Vec2::new(available_width, OVERVIEW_HEIGHT),
-            Sense::hover(),
-        );
+        let (overview_rect, overview_response) =
+            ui.allocate_exact_size(Vec2::new(available_width, OVERVIEW_HEIGHT), Sense::hover());
         self.draw_waveform(ui, &overview_rect, None, true);
 
         // Position cursor on overview
@@ -252,15 +249,14 @@ impl WaveformWidget {
         let total_samples = self.samples.len();
         let width = rect.width() as f64;
 
-        let (start_sample_f, samples_per_pixel) = if let Some((start_secs, duration_secs)) =
-            view_range
-        {
-            let start = start_secs * self.sample_rate as f64;
-            let total = duration_secs * self.sample_rate as f64;
-            (start, total / width)
-        } else {
-            (0.0, total_samples as f64 / width)
-        };
+        let (start_sample_f, samples_per_pixel) =
+            if let Some((start_secs, duration_secs)) = view_range {
+                let start = start_secs * self.sample_rate as f64;
+                let total = duration_secs * self.sample_rate as f64;
+                (start, total / width)
+            } else {
+                (0.0, total_samples as f64 / width)
+            };
 
         let half_height = rect.height() / 2.0;
 
@@ -308,7 +304,11 @@ impl WaveformWidget {
                         sum_high += self.band_high[i] * self.band_high[i];
                     }
                     let n = (band_end - s_start) as f32;
-                    band_color((sum_low / n).sqrt(), (sum_mid / n).sqrt(), (sum_high / n).sqrt())
+                    band_color(
+                        (sum_low / n).sqrt(),
+                        (sum_mid / n).sqrt(),
+                        (sum_high / n).sqrt(),
+                    )
                 } else {
                     band_color(0.0, 0.0, 0.0)
                 }
@@ -351,13 +351,19 @@ impl WaveformWidget {
             let xa = rect.left() + x as f32;
             let xb = xa + 1.0;
             painter.line_segment(
-                [Pos2::new(xa, center_y - max_a * half_height), Pos2::new(xb, center_y - max_b * half_height)],
+                [
+                    Pos2::new(xa, center_y - max_a * half_height),
+                    Pos2::new(xb, center_y - max_b * half_height),
+                ],
                 Stroke::new(1.0, edge_a),
             );
             let (min_a, _, _, _) = columns[x];
             let (min_b, _, _, _) = columns[x + 1];
             painter.line_segment(
-                [Pos2::new(xa, center_y - min_a * half_height), Pos2::new(xb, center_y - min_b * half_height)],
+                [
+                    Pos2::new(xa, center_y - min_a * half_height),
+                    Pos2::new(xb, center_y - min_b * half_height),
+                ],
                 Stroke::new(1.0, edge_a),
             );
         }

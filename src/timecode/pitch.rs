@@ -1,5 +1,5 @@
-pub(crate) const ALPHA: f64 = 1.0/512.0;
-pub(crate) const BETA: f64 = ALPHA/256.0;
+pub(crate) const ALPHA: f64 = 1.0 / 512.0;
+pub(crate) const BETA: f64 = ALPHA / 256.0;
 
 #[derive(Debug)]
 pub struct Pitch {
@@ -10,11 +10,7 @@ pub struct Pitch {
 
 impl Pitch {
     pub fn new(dt: f64) -> Self {
-        Self {
-            dt,
-            x: 0.0,
-            v: 0.0,
-        }
+        Self { dt, x: 0.0, v: 0.0 }
     }
 
     pub fn current(&self) -> f64 {
@@ -53,8 +49,11 @@ mod tests {
         }
 
         let v = pitch.current();
-        assert!((v - 1.0).abs() < 0.01,
-            "should converge to speed 1.0, got {}", v);
+        assert!(
+            (v - 1.0).abs() < 0.01,
+            "should converge to speed 1.0, got {}",
+            v
+        );
     }
 
     #[test]
@@ -66,8 +65,11 @@ mod tests {
         }
 
         let v = pitch.current();
-        assert!((v - 2.5).abs() < 0.05,
-            "should converge to speed 2.5, got {}", v);
+        assert!(
+            (v - 2.5).abs() < 0.05,
+            "should converge to speed 2.5, got {}",
+            v
+        );
     }
 
     #[test]

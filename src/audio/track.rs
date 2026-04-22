@@ -53,12 +53,7 @@ impl Track {
         let mut num_channels = 0usize;
         let mut bytes_read = 0u64;
 
-        loop {
-            let packet = match format.next_packet() {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-
+        while let Ok(packet) = format.next_packet() {
             if packet.track_id() != track_id {
                 continue;
             }
@@ -76,8 +71,7 @@ impl Track {
 
                     if sample_buf.is_none() {
                         num_channels = spec.channels.count();
-                        sample_buf =
-                            Some(SampleBuffer::<f32>::new(capacity as u64, spec));
+                        sample_buf = Some(SampleBuffer::<f32>::new(capacity as u64, spec));
                     }
 
                     let buf = sample_buf.as_mut().unwrap();

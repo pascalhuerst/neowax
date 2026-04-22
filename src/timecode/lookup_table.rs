@@ -23,4 +23,4 @@ impl Lut {
     pub fn contains_key(&self, key: &u32) -> bool {
         self.table.contains_key(key)
     }
-} 
+}

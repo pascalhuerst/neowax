@@ -5,12 +5,12 @@ use std::path::Path;
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, SeekMode};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
-use symphonia::core::errors::Error;
 
 #[derive(Debug)]
 pub struct AudioMetadata {
@@ -54,7 +54,7 @@ impl AudioFile {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         // Try to read ID3 tags first
         let id3_tag = Tag::read_from_path(&path).ok();
-        
+
         // Open the media source
         let file = File::open(&path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -93,9 +93,15 @@ impl AudioFile {
         // Extract basic metadata
         let params = &track.codec_params;
         let metadata = AudioMetadata {
-            title: id3_tag.as_ref().and_then(|tag| tag.title().map(String::from)),
-            artist: id3_tag.as_ref().and_then(|tag| tag.artist().map(String::from)),
-            album: id3_tag.as_ref().and_then(|tag| tag.album().map(String::from)),
+            title: id3_tag
+                .as_ref()
+                .and_then(|tag| tag.title().map(String::from)),
+            artist: id3_tag
+                .as_ref()
+                .and_then(|tag| tag.artist().map(String::from)),
+            album: id3_tag
+                .as_ref()
+                .and_then(|tag| tag.album().map(String::from)),
             year: id3_tag
                 .as_ref()
                 .and_then(|tag| tag.year().map(|y| y.to_string())),
@@ -134,11 +140,11 @@ impl AudioFile {
 
         // Decode the packet into an audio buffer
         let decoded = self.decoder.decode(&packet)?;
-        
+
         // Convert the decoded audio to f32 samples
         let mut sample_buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
         sample_buf.copy_interleaved_ref(decoded);
-        
+
         let mut samples = Vec::with_capacity(sample_buf.samples().len());
         samples.extend_from_slice(sample_buf.samples());
 
@@ -198,7 +204,7 @@ impl AudioFile {
             buf.copy_interleaved_ref(decoded);
 
             // Create an AudioFrame from the current samples
-            let samples = buf.samples().iter().copied().collect();
+            let samples = buf.samples().to_vec();
             return Ok(Some(AudioFrame {
                 samples,
                 num_channels: spec.channels.count(),

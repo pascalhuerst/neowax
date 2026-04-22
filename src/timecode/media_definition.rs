@@ -20,6 +20,7 @@ pub struct TimecodeDef {
 }
 
 impl TimecodeDef {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: &str,
         desc: &str,
@@ -368,6 +369,18 @@ lazy_static::lazy_static! {
     ];
 }
 
+#[allow(unused)]
+pub fn find_definition(name: &str) -> Option<TimecodeDef> {
+    TIMECODES
+        .iter()
+        .find(|def| def.name == name)
+        .cloned()
+        .map(|mut def| {
+            def.lookup = true;
+            def
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,9 +399,11 @@ mod tests {
             let seed = def.seed;
             let fwd = def.fwd(seed);
             let back = def.rev(fwd);
-            assert_eq!(back, seed,
+            assert_eq!(
+                back, seed,
                 "{}: rev(fwd(seed)) != seed (got {:08x}, expected {:08x})",
-                def.name, back, seed);
+                def.name, back, seed
+            );
         }
     }
 
@@ -399,7 +414,11 @@ mod tests {
         let mut state = def.seed;
         for i in 0..1000 {
             state = def.fwd(state);
-            assert_ne!(state, 0, "{}: LFSR degenerated to zero at step {}", def.name, i);
+            assert_ne!(
+                state, 0,
+                "{}: LFSR degenerated to zero at step {}",
+                def.name, i
+            );
         }
     }
 
@@ -409,16 +428,4 @@ mod tests {
         let pos = def.lut_lookup(def.seed);
         assert_eq!(pos, Some(0), "seed should map to position 0");
     }
-}
-
-#[allow(unused)]
-pub fn find_definition(name: &str) -> Option<TimecodeDef> {
-    TIMECODES
-        .iter()
-        .find(|def| def.name == name)
-        .cloned()
-        .map(|mut def| {
-            def.lookup = true;
-            def
-        })
 }

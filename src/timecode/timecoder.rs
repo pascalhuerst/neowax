@@ -144,10 +144,9 @@ impl Timecoder {
             return None;
         }
 
-        match self.def.lut_lookup(self.bitstream) {
-            Some(pos) => Some((pos, self.timecode_ticker as f64 * self.dt)),
-            None => None,
-        }
+        self.def
+            .lut_lookup(self.bitstream)
+            .map(|pos| (pos, self.timecode_ticker as f64 * self.dt))
     }
 
     pub fn get_pitch(&self) -> f64 {
@@ -299,7 +298,7 @@ mod tests {
     use std::io::Read;
 
     #[test]
-    fn test_serato_cd() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_timecode_1min() -> Result<(), Box<dyn std::error::Error>> {
         let def = TimecodeDef::serato_cd();
         let mut tc = Timecoder::new(def, 1.0, 44100, false);
 

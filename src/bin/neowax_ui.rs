@@ -1,8 +1,8 @@
 use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
 use neowax::audio::{DeckState, Engine, Track, TrackCommand};
-use neowax::timecode::TimecodeDef;
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
+use neowax::timecode::TimecodeDef;
 use neowax::ui::{Spinner, WaveformWidget};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -232,15 +232,14 @@ impl NeowaxApp {
         self.track_path = None;
         self.track_duration = 0.0;
         self.current_track_path = None;
-        self.waveform.update_samples(Vec::new(), None, self.waveform.sample_rate());
+        self.waveform
+            .update_samples(Vec::new(), None, self.waveform.sample_rate());
     }
 
     fn load_selected_track(&mut self) {
         let entry = match self.library_flat.get(self.selected_index) {
             Some(e) => match &e.kind {
-                FlatEntryKind::Track { path, display_name } => {
-                    (path.clone(), display_name.clone())
-                }
+                FlatEntryKind::Track { path, display_name } => (path.clone(), display_name.clone()),
                 _ => return,
             },
             None => return,
@@ -254,8 +253,11 @@ impl NeowaxApp {
 
     fn check_loaded_track(&mut self) {
         if let Ok(loaded) = self.loaded_rx.try_recv() {
-            self.waveform.update_samples(loaded.waveform, Some(loaded.bands), loaded.track.rate);
-            self.track_sender.send(TrackCommand::Load(loaded.track)).ok();
+            self.waveform
+                .update_samples(loaded.waveform, Some(loaded.bands), loaded.track.rate);
+            self.track_sender
+                .send(TrackCommand::Load(loaded.track))
+                .ok();
             self.track_name = loaded.name;
             self.title_scroll_offset = 0.0;
             self.track_path = Some(loaded.path.clone());
@@ -396,10 +398,9 @@ impl NeowaxApp {
                     egui::vec2(available, galley.size().y),
                     egui::Sense::hover(),
                 );
-                ui.painter().with_clip_rect(rect).galley(
-                    egui::pos2(rect.left() - scroll, rect.top()),
-                    galley,
-                );
+                ui.painter()
+                    .with_clip_rect(rect)
+                    .galley(egui::pos2(rect.left() - scroll, rect.top()), galley);
                 self.title_scroll_offset += ui.input(|i| i.predicted_dt);
             }
         });
@@ -464,8 +465,7 @@ impl NeowaxApp {
     fn draw_pitch_plot(&self, ui: &mut egui::Ui) {
         let width = ui.available_width();
         let height = ui.available_height();
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
 
         let painter = ui.painter();
         painter.rect_filled(rect, 0.0, Color32::from_rgb(12, 12, 18));
@@ -484,8 +484,7 @@ impl NeowaxApp {
         let plot_min = min_p - margin;
         let plot_max = max_p + margin;
         let plot_range = plot_max - plot_min;
-        let pitch_to_y =
-            |p: f32| rect.bottom() - ((p - plot_min) / plot_range) * rect.height();
+        let pitch_to_y = |p: f32| rect.bottom() - ((p - plot_min) / plot_range) * rect.height();
 
         // 0% reference line (pitch = 1.0), always drawn if in range
         if plot_min < 1.0 && 1.0 < plot_max {
@@ -648,10 +647,7 @@ impl NeowaxApp {
                         FlatEntryKind::Track {
                             path, display_name, ..
                         } => {
-                            let is_current = self
-                                .current_track_path
-                                .as_ref()
-                                .map_or(false, |cp| cp == path);
+                            let is_current = self.current_track_path.as_ref() == Some(path);
 
                             let text = if is_current {
                                 format!("{}>> {}", indent, display_name)
@@ -764,10 +760,7 @@ impl NeowaxApp {
                                 self.toggle_selected_folder();
                             }
                             FlatEntryKind::Track { path, .. } => {
-                                let is_current = self
-                                    .current_track_path
-                                    .as_ref()
-                                    .map_or(false, |cp| cp == path);
+                                let is_current = self.current_track_path.as_ref() == Some(path);
                                 if is_current {
                                     self.view = View::Deck;
                                 } else if self.is_deck_active() {
@@ -834,20 +827,21 @@ impl eframe::App for NeowaxApp {
                 }
 
                 match self.view {
-                View::Deck => self.draw_deck_view(ui),
-                View::Library => {
-                    let lib_action = self.draw_library_view(ui);
-                    match lib_action {
-                        2 => self.rescan_library(),
-                        3 => self.view = View::Deck,
-                        4 => self.toggle_selected_folder(),
-                        1 if !self.is_deck_active() && !self.loading => {
-                            self.load_selected_track();
+                    View::Deck => self.draw_deck_view(ui),
+                    View::Library => {
+                        let lib_action = self.draw_library_view(ui);
+                        match lib_action {
+                            2 => self.rescan_library(),
+                            3 => self.view = View::Deck,
+                            4 => self.toggle_selected_folder(),
+                            1 if !self.is_deck_active() && !self.loading => {
+                                self.load_selected_track();
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }});
+            });
 
         ctx.request_repaint();
     }
@@ -876,10 +870,7 @@ fn main() -> Result<(), eframe::Error> {
         .and_then(|g| {
             let parts: Vec<&str> = g.split('x').collect();
             if parts.len() == 2 {
-                Some((
-                    parts[0].parse::<f32>().ok()?,
-                    parts[1].parse::<f32>().ok()?,
-                ))
+                Some((parts[0].parse::<f32>().ok()?, parts[1].parse::<f32>().ok()?))
             } else {
                 None
             }
