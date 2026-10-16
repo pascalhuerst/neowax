@@ -22,7 +22,15 @@ jobs:
       - name: Add cross-compilation apt sources
         run: |
           sudo dpkg --add-architecture arm64
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list || true
+          # Pin existing sources to amd64 so apt doesn't look for arm64 on the Ubuntu mirrors.
+          # Third-party lists (e.g. microsoft-prod.list) already carry [options]; drop them, we don't need them.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
+          sudo sed -i '/^deb \[/! s/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list /etc/apt/sources.list 2>/dev/null || true
+          for f in /etc/apt/sources.list.d/*.sources; do
+            if [ -e "$f" ] && ! grep -q '^Architectures:' "$f"; then
+              sudo sed -i '/^Types:/a Architectures: amd64' "$f"
+            fi
+          done
           echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/cross-arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/cross-arm64.list
           sudo apt-get update
