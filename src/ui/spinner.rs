@@ -135,7 +135,10 @@ impl Spinner {
                     center.y + radius * self.angle.sin(),
                 );
 
-                painter.line_segment([center, end], egui::Stroke::new(2.0, self.accent.base()));
+                painter.line_segment(
+                    [center, end],
+                    egui::Stroke::new(2.0_f32, self.accent.base()),
+                );
             }
         }
 

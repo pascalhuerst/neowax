@@ -825,7 +825,7 @@ impl NeowaxApp {
             let y = pitch_to_y(1.0);
             painter.line_segment(
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                egui::Stroke::new(1.0, Color32::from_rgb(50, 50, 60)),
+                egui::Stroke::new(1.0_f32, Color32::from_rgb(50, 50, 60)),
             );
             painter.text(
                 egui::pos2(rect.left() + 4.0, y - 2.0),
@@ -856,7 +856,7 @@ impl NeowaxApp {
         if points.len() >= 2 {
             painter.add(egui::Shape::line(
                 points,
-                egui::Stroke::new(1.5, self.accent.base()),
+                egui::Stroke::new(1.5_f32, self.accent.base()),
             ));
         }
 

@@ -2,6 +2,7 @@
 name = "neowax"
 version = "0.1.1"
 edition = "2021"
+description = "Vinyl timecode DJ player"
 
 [dependencies]
 lazy_static = "1.4.0"
@@ -26,7 +27,6 @@ path = "src/bin/neowax_ui.rs"
 
 [package.metadata.deb]
 maintainer = "Pascal Huerst"
-description = "Vinyl timecode DJ player"
 license-file = ["LICENSE", "0"]
 depends = "libasound2, libc6"
 section = "sound"

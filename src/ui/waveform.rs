@@ -211,7 +211,7 @@ impl WaveformWidget {
                     Pos2::new(x, overview_rect.top()),
                     Pos2::new(x, overview_rect.bottom()),
                 ],
-                Stroke::new(1.5, CURSOR_COLOR),
+                Stroke::new(1.5_f32, CURSOR_COLOR),
             );
         }
 
@@ -235,7 +235,7 @@ impl WaveformWidget {
                 Pos2::new(rect.left(), center_y),
                 Pos2::new(rect.right(), center_y),
             ],
-            Stroke::new(1.0, GRIDLINE_COLOR),
+            Stroke::new(1.0_f32, GRIDLINE_COLOR),
         );
 
         if !is_overview {
@@ -243,7 +243,7 @@ impl WaveformWidget {
                 let y = rect.top() + rect.height() * frac;
                 painter.line_segment(
                     [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                    Stroke::new(0.5, GRIDLINE_COLOR),
+                    Stroke::new(0.5_f32, GRIDLINE_COLOR),
                 );
             }
         }
@@ -362,7 +362,7 @@ impl WaveformWidget {
                     Pos2::new(xa, center_y - max_a * half_height),
                     Pos2::new(xb, center_y - max_b * half_height),
                 ],
-                Stroke::new(1.0, edge_a),
+                Stroke::new(1.0_f32, edge_a),
             );
             let (min_a, _, _, _) = columns[x];
             let (min_b, _, _, _) = columns[x + 1];
@@ -371,7 +371,7 @@ impl WaveformWidget {
                     Pos2::new(xa, center_y - min_a * half_height),
                     Pos2::new(xb, center_y - min_b * half_height),
                 ],
-                Stroke::new(1.0, edge_a),
+                Stroke::new(1.0_f32, edge_a),
             );
         }
     }
