@@ -1,4 +1,4 @@
-//! Self-update from a `.deb` file picked in the library.
+//! Self-update from a `.deb` file found while scanning the library.
 //!
 //! The package is inspected with `dpkg-deb`, compared against the installed
 //! version with `dpkg`, and installed with `sudo -n dpkg -i`.
@@ -67,6 +67,30 @@ fn parse_fields(path: &Path, fields: &str) -> Result<DebInfo> {
         version: get("Version")?,
         architecture: get("Architecture")?,
     })
+}
+
+/// Pick the usable neowax package with the highest version, if any.
+pub fn find_best(candidates: &[PathBuf]) -> Option<DebInfo> {
+    let mut best: Option<DebInfo> = None;
+    for path in candidates {
+        let info = match inspect(path) {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::debug!("Ignoring {:?}: {}", path, e);
+                continue;
+            }
+        };
+        let better = match &best {
+            None => true,
+            Some(b) => {
+                compare_versions(&info.version, &b.version).is_ok_and(|o| o == Ordering::Greater)
+            }
+        };
+        if better {
+            best = Some(info);
+        }
+    }
+    best
 }
 
 /// Version of the currently installed package, falling back to the version

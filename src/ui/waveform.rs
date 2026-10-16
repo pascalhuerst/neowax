@@ -1,3 +1,4 @@
+use super::Accent;
 use egui::{epaint::Mesh, Color32, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
 use std::time::Duration;
 
@@ -6,37 +7,36 @@ const CURSOR_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
 const BACKGROUND_COLOR: Color32 = Color32::from_rgb(12, 12, 18);
 const GRIDLINE_COLOR: Color32 = Color32::from_rgb(30, 30, 40);
 
-// Frequency band colors: amber/gold palette
-// Bass = deep amber, Mid = gold, High = warm white
-const FILL_LOW: [f32; 3] = [120.0, 55.0, 10.0];
-const FILL_MID: [f32; 3] = [150.0, 95.0, 20.0];
-const FILL_HIGH: [f32; 3] = [160.0, 125.0, 45.0];
-const EDGE_LOW: [f32; 3] = [200.0, 110.0, 30.0];
-const EDGE_MID: [f32; 3] = [240.0, 180.0, 60.0];
-const EDGE_HIGH: [f32; 3] = [255.0, 220.0, 130.0];
+// Frequency band colors, derived from the accent by brightness.
+// Bass = darkest, Mid = accent, High = lightest
+fn band_color(accent: Accent, low: f32, mid: f32, high: f32) -> (Color32, Color32) {
+    let fill_low = accent.scaled_rgb(0.5);
+    let fill_mid = accent.scaled_rgb(0.62);
+    let fill_high = accent.scaled_rgb(0.7);
+    let edge_low = accent.scaled_rgb(0.82);
+    let edge_mid = accent.scaled_rgb(1.0);
+    let edge_high = accent.bright_rgb();
 
-fn band_color(low: f32, mid: f32, high: f32) -> (Color32, Color32) {
     let total = low + mid + high;
     if total < 1e-6 {
-        return (
-            Color32::from_rgb(150, 95, 20),
-            Color32::from_rgb(240, 180, 60),
-        );
+        return (to_color(fill_mid), to_color(edge_mid));
     }
-    let wl = low / total;
-    let wm = mid / total;
-    let wh = high / total;
-    let fill = Color32::from_rgb(
-        (FILL_LOW[0] * wl + FILL_MID[0] * wm + FILL_HIGH[0] * wh) as u8,
-        (FILL_LOW[1] * wl + FILL_MID[1] * wm + FILL_HIGH[1] * wh) as u8,
-        (FILL_LOW[2] * wl + FILL_MID[2] * wm + FILL_HIGH[2] * wh) as u8,
-    );
-    let edge = Color32::from_rgb(
-        (EDGE_LOW[0] * wl + EDGE_MID[0] * wm + EDGE_HIGH[0] * wh) as u8,
-        (EDGE_LOW[1] * wl + EDGE_MID[1] * wm + EDGE_HIGH[1] * wh) as u8,
-        (EDGE_LOW[2] * wl + EDGE_MID[2] * wm + EDGE_HIGH[2] * wh) as u8,
-    );
-    (fill, edge)
+    let (wl, wm, wh) = (low / total, mid / total, high / total);
+    let blend = |l: [f32; 3], m: [f32; 3], h: [f32; 3]| {
+        to_color([
+            l[0] * wl + m[0] * wm + h[0] * wh,
+            l[1] * wl + m[1] * wm + h[1] * wh,
+            l[2] * wl + m[2] * wm + h[2] * wh,
+        ])
+    };
+    (
+        blend(fill_low, fill_mid, fill_high),
+        blend(edge_low, edge_mid, edge_high),
+    )
+}
+
+fn to_color(rgb: [f32; 3]) -> Color32 {
+    Color32::from_rgb(rgb[0] as u8, rgb[1] as u8, rgb[2] as u8)
 }
 
 /// Pre-computed min/max at power-of-2 block sizes for fast waveform drawing.
@@ -125,6 +125,7 @@ pub struct WaveformWidget {
     band_low: Vec<f32>,
     band_mid: Vec<f32>,
     band_high: Vec<f32>,
+    accent: Accent,
 }
 
 struct MipmapHolder(WaveformMipmap);
@@ -147,7 +148,12 @@ impl WaveformWidget {
             band_low: Vec::new(),
             band_mid: Vec::new(),
             band_high: Vec::new(),
+            accent: Accent::default(),
         }
+    }
+
+    pub fn set_accent(&mut self, accent: Accent) {
+        self.accent = accent;
     }
 
     pub fn update_samples(
@@ -305,15 +311,16 @@ impl WaveformWidget {
                     }
                     let n = (band_end - s_start) as f32;
                     band_color(
+                        self.accent,
                         (sum_low / n).sqrt(),
                         (sum_mid / n).sqrt(),
                         (sum_high / n).sqrt(),
                     )
                 } else {
-                    band_color(0.0, 0.0, 0.0)
+                    band_color(self.accent, 0.0, 0.0, 0.0)
                 }
             } else {
-                band_color(0.0, 0.0, 0.0)
+                band_color(self.accent, 0.0, 0.0, 0.0)
             };
 
             columns.push((min, max, fill, edge));

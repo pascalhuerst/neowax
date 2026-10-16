@@ -1,3 +1,4 @@
+use super::Accent;
 use eframe::egui;
 use std::f32::consts::PI;
 use std::time::Instant;
@@ -10,8 +11,7 @@ const DRIFT_CORRECTION: f32 = 0.02;
 pub struct Spinner {
     size: f32,
     monitor_data: Option<Vec<u8>>,
-    primary_color: egui::Color32,
-    secondary_color: egui::Color32,
+    accent: Accent,
 
     /// Angle in radians, driven by integrating pitch. Never jumps.
     angle: f32,
@@ -32,8 +32,7 @@ impl Spinner {
         Self {
             size,
             monitor_data: None,
-            primary_color: egui::Color32::from_rgb(240, 180, 60),
-            secondary_color: egui::Color32::from_rgb(40, 25, 8),
+            accent: Accent::default(),
             angle: 0.0,
             vinyl_pitch: 0.0,
             engine_position: 0.0,
@@ -41,6 +40,10 @@ impl Spinner {
             has_position: false,
             resolution: 1000.0,
         }
+    }
+
+    pub fn set_accent(&mut self, accent: Accent) {
+        self.accent = accent;
     }
 
     pub fn update_monitor(&mut self, data: Option<Vec<u8>>) {
@@ -107,9 +110,9 @@ impl Spinner {
                             let intensity = monitor[idx];
                             let color = if intensity > 0 {
                                 let scale = intensity as f32 / 255.0;
-                                self.primary_color.linear_multiply(scale)
+                                self.accent.base().linear_multiply(scale)
                             } else {
-                                self.secondary_color
+                                self.accent.tint()
                             };
 
                             let pos = rect.min + egui::vec2(x as f32, y as f32);
@@ -132,7 +135,7 @@ impl Spinner {
                     center.y + radius * self.angle.sin(),
                 );
 
-                painter.line_segment([center, end], egui::Stroke::new(2.0, self.primary_color));
+                painter.line_segment([center, end], egui::Stroke::new(2.0, self.accent.base()));
             }
         }
 

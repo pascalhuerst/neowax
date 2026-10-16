@@ -1,7 +1,8 @@
+use crate::update;
 use std::path::{Path, PathBuf};
 
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "wav", "ogg", "aac", "m4a", "opus", "aiff", "aif", "deb",
+    "mp3", "flac", "wav", "ogg", "aac", "m4a", "opus", "aiff", "aif",
 ];
 
 /// A node in the library tree: either a folder (with children) or an audio file.
@@ -52,15 +53,24 @@ impl FlatEntry {
     }
 }
 
-/// Scan a directory and build a tree of folders, audio files and `.deb` update packages.
-/// Filters out dotfiles and empty folders.
-pub fn scan_directory(dir: &Path) -> Vec<LibraryNode> {
-    let mut nodes = scan_dir_nodes(dir);
-    sort_nodes(&mut nodes);
-    nodes
+/// Result of scanning a directory.
+pub struct Scan {
+    pub tree: Vec<LibraryNode>,
+    /// `.deb` files found along the way. They never appear in the tree;
+    /// they are offered as updates in the settings panel.
+    pub packages: Vec<PathBuf>,
 }
 
-fn scan_dir_nodes(dir: &Path) -> Vec<LibraryNode> {
+/// Scan a directory and build a tree of folders and audio files.
+/// Filters out dotfiles and empty folders.
+pub fn scan_directory(dir: &Path) -> Scan {
+    let mut packages = Vec::new();
+    let mut tree = scan_dir_nodes(dir, &mut packages);
+    sort_nodes(&mut tree);
+    Scan { tree, packages }
+}
+
+fn scan_dir_nodes(dir: &Path, packages: &mut Vec<PathBuf>) -> Vec<LibraryNode> {
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) => {
@@ -82,7 +92,7 @@ fn scan_dir_nodes(dir: &Path) -> Vec<LibraryNode> {
         }
 
         if path.is_dir() {
-            let children = scan_dir_nodes(&path);
+            let children = scan_dir_nodes(&path, packages);
             // Only include folders that contain audio files (directly or nested)
             if !children.is_empty() {
                 nodes.push(LibraryNode::Folder {
@@ -92,7 +102,9 @@ fn scan_dir_nodes(dir: &Path) -> Vec<LibraryNode> {
                 });
             }
         } else if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if update::is_deb(&path) {
+                packages.push(path);
+            } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 if AUDIO_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
                     let display_name = path
                         .file_stem()

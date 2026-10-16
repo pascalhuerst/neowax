@@ -2,8 +2,9 @@ use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
 use neowax::audio::{DeckState, Engine, Track, TrackCommand};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
+use neowax::sysinfo;
 use neowax::timecode::TimecodeDef;
-use neowax::ui::{Spinner, WaveformWidget};
+use neowax::ui::{Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
 use neowax::update::{self, DebInfo};
 use std::cmp::Ordering as VersionOrdering;
 use std::collections::VecDeque;
@@ -78,11 +79,35 @@ struct Args {
     check_args: bool,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum View {
     Deck,
     Library,
+    Settings,
     Update,
+}
+
+/// Library list selection sentinels, ordered as displayed above the tree.
+const SEL_BACK: usize = usize::MAX - 2;
+const SEL_SETTINGS: usize = usize::MAX - 1;
+const SEL_RESCAN: usize = usize::MAX;
+
+#[derive(PartialEq, Clone, Copy)]
+enum SettingsRow {
+    Back,
+    Pitch,
+    Accent,
+    Update,
+}
+
+struct SettingsState {
+    /// Index into the currently visible rows
+    selected: usize,
+    pitch_open: bool,
+    /// A value row is being edited: the encoder changes the value, click confirms
+    editing: bool,
+    /// View to return to on [Back]
+    return_to: View,
 }
 
 enum UpdatePhase {
@@ -151,14 +176,19 @@ struct NeowaxApp {
     // Pitch history for calibration plot (ring buffer)
     pitch_history: VecDeque<f32>,
 
-    // Debug: show pitch history plot
-    show_pitch_plot: bool,
+    // Settings panel
+    settings: SettingsState,
+    accent_index: usize,
+    accent: Accent,
+    os_version: String,
+    /// Best neowax .deb found while scanning the library
+    available_update: Option<DebInfo>,
 
     // Status flash message
     status_message: String,
     status_timer: f64,
 
-    // Self-update from a .deb picked in the library
+    // Self-update installer state (opened from the settings panel)
     update: Option<UpdateState>,
     restart_requested: Arc<AtomicBool>,
 }
@@ -168,11 +198,12 @@ impl NeowaxApp {
         deck_state: Arc<DeckState>,
         track_sender: mpsc::Sender<TrackCommand>,
         library_dir: PathBuf,
-        library_tree: Vec<LibraryNode>,
+        scan: library::Scan,
         sample_rate: u32,
         timecode_resolution: f64,
         restart_requested: Arc<AtomicBool>,
     ) -> Self {
+        let library_tree = scan.tree;
         let library_flat = library::flatten_tree(&library_tree);
         let (load_request_tx, load_request_rx) = mpsc::channel::<(PathBuf, String)>();
         let (loaded_tx, loaded_rx) = mpsc::channel::<LoadedTrack>();
@@ -235,7 +266,16 @@ impl NeowaxApp {
             title_scroll_offset: 0.0,
             pitch_history: VecDeque::with_capacity(600),
             timecode_resolution,
-            show_pitch_plot: false,
+            settings: SettingsState {
+                selected: 0,
+                pitch_open: false,
+                editing: false,
+                return_to: View::Deck,
+            },
+            accent_index: 0,
+            accent: Accent::default(),
+            os_version: sysinfo::os_version(),
+            available_update: update::find_best(&scan.packages),
             status_message: String::new(),
             status_timer: 0.0,
             update: None,
@@ -250,7 +290,9 @@ impl NeowaxApp {
     fn rescan_library(&mut self) {
         // Touch the directory to trigger systemd automount if needed
         let _ = std::fs::read_dir(&self.library_dir);
-        self.library_tree = library::scan_directory(&self.library_dir);
+        let scan = library::scan_directory(&self.library_dir);
+        self.library_tree = scan.tree;
+        self.available_update = update::find_best(&scan.packages);
         self.library_flat = library::flatten_tree(&self.library_tree);
         self.selected_index = 0;
         tracing::info!("Rescanned library: {} entries", self.library_flat.len());
@@ -274,10 +316,6 @@ impl NeowaxApp {
             },
             None => return,
         };
-        if update::is_deb(&entry.0) {
-            self.begin_update(&entry.0);
-            return;
-        }
         self.clear_deck();
         self.current_track_path = Some(entry.0.clone());
         self.track_name = format!("Loading {}...", entry.1);
@@ -290,15 +328,8 @@ impl NeowaxApp {
         self.status_timer = 3.0;
     }
 
-    /// Analyze a selected .deb and, if it is a usable neowax package, open the update view.
-    fn begin_update(&mut self, path: &std::path::Path) {
-        let info = match update::inspect(path) {
-            Ok(info) => info,
-            Err(e) => {
-                self.flash(format!("Cannot update: {e}"));
-                return;
-            }
-        };
+    /// Open the update view for a neowax package found in the library.
+    fn begin_update(&mut self, info: DebInfo) {
         let installed = update::installed_version();
         let ordering =
             update::compare_versions(&info.version, &installed).unwrap_or(VersionOrdering::Equal);
@@ -358,12 +389,12 @@ impl NeowaxApp {
         let Some(state) = &self.update else {
             return;
         };
-        let amber = Color32::from_rgb(240, 180, 60);
+        let amber = self.accent.base();
         let dim = Color32::from_rgb(180, 170, 150);
 
         ui.label(
             RichText::new("Update neowax")
-                .color(Color32::from_rgb(240, 200, 130))
+                .color(self.accent.bright())
                 .size(20.0),
         );
         ui.add_space(SPACER);
@@ -404,9 +435,9 @@ impl NeowaxApp {
                         selected,
                         RichText::new(*label)
                             .color(if selected {
-                                Color32::from_rgb(255, 220, 130)
+                                self.accent.bright()
                             } else {
-                                Color32::from_rgb(200, 160, 60)
+                                self.accent.mid()
                             })
                             .size(20.0),
                     );
@@ -519,9 +550,9 @@ impl NeowaxApp {
             let fill_height = bar_height * self.signal_quality;
             if fill_height > 0.0 {
                 let color = if self.signal_quality > 0.9 {
-                    Color32::from_rgb(240, 180, 60)
+                    self.accent.base()
                 } else if self.signal_quality > 0.5 {
-                    Color32::from_rgb(200, 140, 30)
+                    self.accent.mid()
                 } else {
                     Color32::from_rgb(160, 50, 20)
                 };
@@ -587,7 +618,7 @@ impl NeowaxApp {
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(Self::format_time(elapsed))
-                    .color(Color32::from_rgb(240, 180, 60))
+                    .color(self.accent.base())
                     .size(20.0)
                     .monospace(),
             );
@@ -595,7 +626,7 @@ impl NeowaxApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!("-{}", Self::format_time(remaining)))
-                        .color(Color32::from_rgb(240, 180, 60))
+                        .color(self.accent.base())
                         .size(20.0)
                         .monospace(),
                 );
@@ -609,38 +640,165 @@ impl NeowaxApp {
 
         ui.add_space(SPACER);
 
-        // Pitch plot (debug, toggled) or toggle button
-        if self.show_pitch_plot {
-            self.draw_pitch_plot(ui);
-            ui.add_space(4.0);
-        }
-
-        // Bottom bar: toggle button pinned to bottom
+        // Bottom bar: settings button pinned to bottom
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            let label = if self.show_pitch_plot {
-                "Hide Pitch"
-            } else {
-                "Show Pitch"
-            };
             let btn = ui.add_sized(
                 [ui.available_width(), 32.0],
                 egui::Button::new(
-                    RichText::new(label)
-                        .color(Color32::from_rgb(200, 160, 60))
+                    RichText::new("Settings")
+                        .color(self.accent.mid())
                         .size(14.0),
                 )
-                .fill(Color32::from_rgb(35, 28, 15))
+                .fill(self.accent.tint())
                 .rounding(4.0),
             );
             if btn.clicked() {
-                self.show_pitch_plot = !self.show_pitch_plot;
+                self.open_settings();
             }
         });
     }
 
-    fn draw_pitch_plot(&self, ui: &mut egui::Ui) {
+    fn open_settings(&mut self) {
+        self.settings.return_to = self.view;
+        self.settings.selected = 0;
+        self.settings.editing = false;
+        self.view = View::Settings;
+    }
+
+    fn settings_rows(&self) -> Vec<SettingsRow> {
+        let mut rows = vec![SettingsRow::Back, SettingsRow::Pitch, SettingsRow::Accent];
+        if self.available_update.is_some() {
+            rows.push(SettingsRow::Update);
+        }
+        rows
+    }
+
+    fn set_accent(&mut self, index: usize) {
+        self.accent_index = index % ACCENT_PRESETS.len();
+        self.accent = Accent::from_preset(self.accent_index);
+        self.spinner.set_accent(self.accent);
+        self.waveform.set_accent(self.accent);
+    }
+
+    fn step_accent(&mut self, delta: isize) {
+        let n = ACCENT_PRESETS.len() as isize;
+        self.set_accent((self.accent_index as isize + delta).rem_euclid(n) as usize);
+    }
+
+    /// The encoder was clicked (or the row tapped) on a settings row.
+    fn activate_setting(&mut self, row: SettingsRow) {
+        match row {
+            SettingsRow::Back => {
+                self.settings.editing = false;
+                self.view = self.settings.return_to;
+            }
+            SettingsRow::Pitch => self.settings.pitch_open = !self.settings.pitch_open,
+            SettingsRow::Accent => self.settings.editing = !self.settings.editing,
+            SettingsRow::Update => {
+                if self.is_deck_active() {
+                    self.flash("Stop the deck first!");
+                } else if let Some(info) = self.available_update.clone() {
+                    self.begin_update(info);
+                }
+            }
+        }
+    }
+
+    fn draw_status(&self, ui: &mut egui::Ui) {
+        if !self.status_message.is_empty() {
+            ui.add_space(SPACER);
+            ui.label(
+                RichText::new(&self.status_message)
+                    .color(Color32::from_rgb(200, 80, 30))
+                    .size(16.0),
+            );
+        }
+    }
+
+    /// Returns the row that was tapped, if any.
+    fn draw_settings_view(&self, ui: &mut egui::Ui) -> Option<(usize, SettingsRow)> {
+        let rows = self.settings_rows();
+        let mut clicked = None;
+
+        ui.label(
+            RichText::new("Settings")
+                .color(self.accent.bright())
+                .size(20.0),
+        );
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .enable_scrolling(false)
+            .show(ui, |ui| {
+                for (idx, &row) in rows.iter().enumerate() {
+                    let selected = idx == self.settings.selected;
+                    let text = match row {
+                        SettingsRow::Back => "[Back]".to_string(),
+                        SettingsRow::Pitch => {
+                            let fold = if self.settings.pitch_open { "v" } else { ">" };
+                            format!("{fold} Pitch")
+                        }
+                        SettingsRow::Accent => {
+                            let name = ACCENT_PRESETS[self.accent_index].0;
+                            if selected && self.settings.editing {
+                                format!("Accent color: < {name} >")
+                            } else {
+                                format!("Accent color: {name}")
+                            }
+                        }
+                        SettingsRow::Update => {
+                            let version = self.available_update.as_ref().map_or("", |u| &u.version);
+                            format!("Install update: {version}")
+                        }
+                    };
+
+                    ui.horizontal(|ui| {
+                        let response = ui.selectable_label(
+                            selected,
+                            RichText::new(text)
+                                .color(if selected {
+                                    self.accent.bright()
+                                } else {
+                                    self.accent.mid()
+                                })
+                                .size(16.0),
+                        );
+                        if row == SettingsRow::Accent {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                            ui.painter().rect_filled(rect, 3.0, self.accent.base());
+                        }
+                        if selected {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if response.clicked() {
+                            clicked = Some((idx, row));
+                        }
+                    });
+
+                    if row == SettingsRow::Pitch && self.settings.pitch_open {
+                        self.draw_pitch_plot(ui, 120.0);
+                        ui.add_space(4.0);
+                    }
+                }
+
+                ui.separator();
+                let info_color = Color32::from_rgb(180, 170, 150);
+                ui.label(
+                    RichText::new(format!("neowax {}", env!("CARGO_PKG_VERSION")))
+                        .color(info_color)
+                        .size(14.0),
+                );
+                ui.label(RichText::new(&self.os_version).color(info_color).size(14.0));
+            });
+
+        self.draw_status(ui);
+        clicked
+    }
+
+    fn draw_pitch_plot(&self, ui: &mut egui::Ui, height: f32) {
         let width = ui.available_width();
-        let height = ui.available_height();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
 
         let painter = ui.painter();
@@ -698,7 +856,7 @@ impl NeowaxApp {
         if points.len() >= 2 {
             painter.add(egui::Shape::line(
                 points,
-                egui::Stroke::new(1.5, Color32::from_rgb(240, 180, 60)),
+                egui::Stroke::new(1.5, self.accent.base()),
             ));
         }
 
@@ -710,7 +868,7 @@ impl NeowaxApp {
                     egui::Align2::RIGHT_TOP,
                     format!("{:+.2}%", (last - 1.0) * 100.0),
                     egui::FontId::monospace(12.0),
-                    Color32::from_rgb(240, 180, 60),
+                    self.accent.base(),
                 );
             }
         }
@@ -732,11 +890,11 @@ impl NeowaxApp {
     }
 
     fn draw_library_view(&mut self, ui: &mut egui::Ui) -> u8 {
-        let mut action = 0u8; // 0=none, 1=load, 2=rescan, 3=back to deck
+        let mut action = 0u8; // 0=none, 1=load, 2=rescan, 3=back to deck, 4=toggle folder, 5=settings
 
         ui.label(
             RichText::new("Library")
-                .color(Color32::from_rgb(240, 200, 130))
+                .color(self.accent.bright())
                 .size(20.0),
         );
         ui.add_space(4.0);
@@ -745,48 +903,32 @@ impl NeowaxApp {
             .auto_shrink([false, false])
             .enable_scrolling(false)
             .show(ui, |ui| {
-                // Back entry
-                let back_selected = self.selected_index == usize::MAX - 1;
-                let response = ui.selectable_label(
-                    back_selected,
-                    RichText::new("[Back]")
-                        .color(if back_selected {
-                            Color32::from_rgb(255, 220, 130)
-                        } else {
-                            Color32::from_rgb(200, 160, 60)
-                        })
-                        .size(16.0),
-                );
-                if back_selected {
-                    response.scroll_to_me(Some(egui::Align::Center));
-                }
-                if response.clicked() {
-                    self.selected_index = usize::MAX - 1;
-                }
-                if response.double_clicked() {
-                    action = 3;
-                }
-
-                // Rescan entry
-                let rescan_selected = self.selected_index == usize::MAX;
-                let response = ui.selectable_label(
-                    rescan_selected,
-                    RichText::new("[Rescan]")
-                        .color(if rescan_selected {
-                            Color32::from_rgb(255, 220, 130)
-                        } else {
-                            Color32::from_rgb(200, 160, 60)
-                        })
-                        .size(16.0),
-                );
-                if rescan_selected {
-                    response.scroll_to_me(Some(egui::Align::Center));
-                }
-                if response.clicked() {
-                    self.selected_index = usize::MAX;
-                }
-                if response.double_clicked() {
-                    action = 2;
+                // Fixed entries above the tree
+                for (sel, label, act) in [
+                    (SEL_BACK, "[Back]", 3u8),
+                    (SEL_SETTINGS, "[Settings]", 5),
+                    (SEL_RESCAN, "[Rescan]", 2),
+                ] {
+                    let selected = self.selected_index == sel;
+                    let response = ui.selectable_label(
+                        selected,
+                        RichText::new(label)
+                            .color(if selected {
+                                self.accent.bright()
+                            } else {
+                                self.accent.mid()
+                            })
+                            .size(16.0),
+                    );
+                    if selected {
+                        response.scroll_to_me(Some(egui::Align::Center));
+                    }
+                    if response.clicked() {
+                        self.selected_index = sel;
+                    }
+                    if response.double_clicked() {
+                        action = act;
+                    }
                 }
 
                 ui.separator();
@@ -801,9 +943,9 @@ impl NeowaxApp {
                             let prefix = if *open { "v " } else { "> " };
                             let text = format!("{}{}{}", indent, prefix, name);
                             let color = if is_selected {
-                                Color32::from_rgb(240, 180, 60)
+                                self.accent.base()
                             } else {
-                                Color32::from_rgb(180, 130, 40)
+                                self.accent.dim()
                             };
                             let response = ui.selectable_label(
                                 is_selected,
@@ -832,11 +974,11 @@ impl NeowaxApp {
                             };
 
                             let color = if is_current && is_selected {
-                                Color32::from_rgb(255, 220, 130)
+                                self.accent.bright()
                             } else if is_current {
-                                Color32::from_rgb(240, 180, 60)
+                                self.accent.base()
                             } else if is_selected {
-                                Color32::from_rgb(230, 210, 170)
+                                self.accent.light()
                             } else {
                                 Color32::from_rgb(180, 170, 150)
                             };
@@ -865,15 +1007,7 @@ impl NeowaxApp {
                 }
             });
 
-        // Status message at bottom
-        if !self.status_message.is_empty() {
-            ui.add_space(SPACER);
-            ui.label(
-                RichText::new(&self.status_message)
-                    .color(Color32::from_rgb(200, 80, 30))
-                    .size(16.0),
-            );
-        }
+        self.draw_status(ui);
 
         action
     }
@@ -885,29 +1019,47 @@ impl NeowaxApp {
             // Rotary encoder scroll (REL_HWHEEL) + mouse wheel + arrow keys
             let scroll = i.scroll_delta.y + i.scroll_delta.x;
 
+            // Scroll inverted: scroll down (negative) = move up in list
+            let up = scroll < 0.0 || i.key_pressed(egui::Key::ArrowUp);
+            let down = scroll > 0.0 || i.key_pressed(egui::Key::ArrowDown);
+
             if self.view == View::Library {
-                // Navigate library: [Back] → [Rescan] → tree entries...
-                // Scroll inverted: scroll down (negative) = move up in list
-                if scroll < 0.0 || i.key_pressed(egui::Key::ArrowUp) {
+                // Navigate library: [Back] → [Settings] → [Rescan] → tree entries...
+                if up {
                     if self.selected_index == 0 {
-                        self.selected_index = usize::MAX; // → [Rescan]
-                    } else if self.selected_index == usize::MAX {
-                        self.selected_index = usize::MAX - 1; // → [Back]
-                    } else if self.selected_index == usize::MAX - 1 {
-                        // at [Back], stay
-                    } else {
+                        self.selected_index = SEL_RESCAN;
+                    } else if self.selected_index != SEL_BACK {
                         self.selected_index -= 1;
                     }
                 }
-                if scroll > 0.0 || i.key_pressed(egui::Key::ArrowDown) {
-                    if self.selected_index == usize::MAX - 1 {
-                        self.selected_index = usize::MAX; // → [Rescan]
-                    } else if self.selected_index == usize::MAX {
+                if down {
+                    if self.selected_index >= SEL_BACK && self.selected_index < SEL_RESCAN {
+                        self.selected_index += 1;
+                    } else if self.selected_index == SEL_RESCAN {
                         if !self.library_flat.is_empty() {
                             self.selected_index = 0; // → first entry
                         }
                     } else if self.selected_index + 1 < self.library_flat.len() {
                         self.selected_index += 1;
+                    }
+                }
+            }
+
+            if self.view == View::Settings {
+                if self.settings.editing {
+                    if down {
+                        self.step_accent(1);
+                    }
+                    if up {
+                        self.step_accent(-1);
+                    }
+                } else {
+                    let last = self.settings_rows().len() - 1;
+                    if up {
+                        self.settings.selected = self.settings.selected.saturating_sub(1);
+                    }
+                    if down {
+                        self.settings.selected = (self.settings.selected + 1).min(last);
                     }
                 }
             }
@@ -933,16 +1085,22 @@ impl NeowaxApp {
             match self.view {
                 View::Update => {
                     let Some(state) = &self.update else {
-                        self.view = View::Library;
+                        self.view = View::Settings;
                         return;
                     };
                     match state.phase {
                         UpdatePhase::Confirm if state.selected == 0 => self.start_install(),
                         UpdatePhase::Confirm | UpdatePhase::Failed(_) => {
                             self.update = None;
-                            self.view = View::Library;
+                            self.view = View::Settings;
                         }
                         UpdatePhase::Installing(_) => {}
+                    }
+                }
+                View::Settings => {
+                    let rows = self.settings_rows();
+                    if let Some(&row) = rows.get(self.settings.selected) {
+                        self.activate_setting(row);
                     }
                 }
                 View::Deck => {
@@ -950,10 +1108,11 @@ impl NeowaxApp {
                     self.view = View::Library;
                 }
                 View::Library => {
-                    if self.selected_index == usize::MAX - 1 {
-                        // [Back]
+                    if self.selected_index == SEL_BACK {
                         self.view = View::Deck;
-                    } else if self.selected_index == usize::MAX {
+                    } else if self.selected_index == SEL_SETTINGS {
+                        self.open_settings();
+                    } else if self.selected_index == SEL_RESCAN {
                         // Rescan
                         self.rescan_library();
                     } else if let Some(entry) = self.library_flat.get(self.selected_index) {
@@ -1024,7 +1183,7 @@ impl eframe::App for NeowaxApp {
                                 bar_rect.bottom(),
                             ),
                         );
-                        painter.rect_filled(fill_rect, 0.0, Color32::from_rgb(240, 180, 60));
+                        painter.rect_filled(fill_rect, 0.0, self.accent.base());
                     }
                     ui.add_space(2.0);
                 }
@@ -1032,10 +1191,21 @@ impl eframe::App for NeowaxApp {
                 match self.view {
                     View::Deck => self.draw_deck_view(ui),
                     View::Update => self.draw_update_view(ui),
+                    View::Settings => {
+                        if let Some((idx, row)) = self.draw_settings_view(ui) {
+                            self.settings.selected = idx;
+                            match row {
+                                // Touch: tapping the color cycles it
+                                SettingsRow::Accent => self.step_accent(1),
+                                _ => self.activate_setting(row),
+                            }
+                        }
+                    }
                     View::Library => {
                         let lib_action = self.draw_library_view(ui);
                         match lib_action {
                             2 => self.rescan_library(),
+                            5 => self.open_settings(),
                             3 => self.view = View::Deck,
                             4 => self.toggle_selected_folder(),
                             1 if !self.is_deck_active() && !self.loading => {
@@ -1084,7 +1254,7 @@ fn main() -> Result<(), eframe::Error> {
         })
         .unwrap_or((1024.0, 600.0));
 
-    let library_tree = library::scan_directory(&args.library);
+    let scan = library::scan_directory(&args.library);
     tracing::info!("Scanned library in {:?}", args.library);
 
     let running = Arc::new(AtomicBool::new(true));
@@ -1116,7 +1286,7 @@ fn main() -> Result<(), eframe::Error> {
         deck_state,
         track_sender,
         args.library.clone(),
-        library_tree,
+        scan,
         args.sample_rate,
         timecode_resolution,
         restart_requested.clone(),
