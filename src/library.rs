@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "wav", "ogg", "aac", "m4a", "opus", "aiff", "aif",
+    "mp3", "flac", "wav", "ogg", "aac", "m4a", "opus", "aiff", "aif", "deb",
 ];
 
 /// A node in the library tree: either a folder (with children) or an audio file.
@@ -52,7 +52,7 @@ impl FlatEntry {
     }
 }
 
-/// Scan a directory and build a tree of folders and audio files.
+/// Scan a directory and build a tree of folders, audio files and `.deb` update packages.
 /// Filters out dotfiles and empty folders.
 pub fn scan_directory(dir: &Path) -> Vec<LibraryNode> {
     let mut nodes = scan_dir_nodes(dir);

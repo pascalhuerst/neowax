@@ -4,6 +4,8 @@ use neowax::audio::{DeckState, Engine, Track, TrackCommand};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
 use neowax::timecode::TimecodeDef;
 use neowax::ui::{Spinner, WaveformWidget};
+use neowax::update::{self, DebInfo};
+use std::cmp::Ordering as VersionOrdering;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -70,12 +72,33 @@ struct Args {
     /// CPU core to pin the playback thread to (default: 2)
     #[arg(long, default_value_t = 2)]
     playback_cpu: usize,
+
+    /// Parse arguments and exit (used to validate a restart after an update)
+    #[arg(long, hide = true)]
+    check_args: bool,
 }
 
 #[derive(PartialEq)]
 enum View {
     Deck,
     Library,
+    Update,
+}
+
+enum UpdatePhase {
+    /// Waiting for the user to pick Install or Cancel
+    Confirm,
+    Installing(mpsc::Receiver<Result<(), String>>),
+    Failed(String),
+}
+
+struct UpdateState {
+    info: DebInfo,
+    installed: String,
+    ordering: VersionOrdering,
+    /// 0 = Install, 1 = Cancel
+    selected: usize,
+    phase: UpdatePhase,
 }
 
 struct LoadedTrack {
@@ -134,6 +157,10 @@ struct NeowaxApp {
     // Status flash message
     status_message: String,
     status_timer: f64,
+
+    // Self-update from a .deb picked in the library
+    update: Option<UpdateState>,
+    restart_requested: Arc<AtomicBool>,
 }
 
 impl NeowaxApp {
@@ -144,6 +171,7 @@ impl NeowaxApp {
         library_tree: Vec<LibraryNode>,
         sample_rate: u32,
         timecode_resolution: f64,
+        restart_requested: Arc<AtomicBool>,
     ) -> Self {
         let library_flat = library::flatten_tree(&library_tree);
         let (load_request_tx, load_request_rx) = mpsc::channel::<(PathBuf, String)>();
@@ -210,6 +238,8 @@ impl NeowaxApp {
             show_pitch_plot: false,
             status_message: String::new(),
             status_timer: 0.0,
+            update: None,
+            restart_requested,
         }
     }
 
@@ -244,11 +274,157 @@ impl NeowaxApp {
             },
             None => return,
         };
+        if update::is_deb(&entry.0) {
+            self.begin_update(&entry.0);
+            return;
+        }
         self.clear_deck();
         self.current_track_path = Some(entry.0.clone());
         self.track_name = format!("Loading {}...", entry.1);
         self.loading = true;
         self.load_request_tx.send(entry).ok();
+    }
+
+    fn flash(&mut self, msg: impl Into<String>) {
+        self.status_message = msg.into();
+        self.status_timer = 3.0;
+    }
+
+    /// Analyze a selected .deb and, if it is a usable neowax package, open the update view.
+    fn begin_update(&mut self, path: &std::path::Path) {
+        let info = match update::inspect(path) {
+            Ok(info) => info,
+            Err(e) => {
+                self.flash(format!("Cannot update: {e}"));
+                return;
+            }
+        };
+        let installed = update::installed_version();
+        let ordering =
+            update::compare_versions(&info.version, &installed).unwrap_or(VersionOrdering::Equal);
+        self.update = Some(UpdateState {
+            info,
+            installed,
+            ordering,
+            // Default to Cancel when the package is not newer
+            selected: if ordering == VersionOrdering::Greater {
+                0
+            } else {
+                1
+            },
+            phase: UpdatePhase::Confirm,
+        });
+        self.view = View::Update;
+    }
+
+    fn start_install(&mut self) {
+        let Some(state) = self.update.as_mut() else {
+            return;
+        };
+        let path = state.info.path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = update::install(&path).and_then(|()| update::check_restart_args());
+            tx.send(result.map_err(|e| e.to_string())).ok();
+        });
+        state.phase = UpdatePhase::Installing(rx);
+    }
+
+    fn check_update_progress(&mut self, ctx: &egui::Context) {
+        let Some(state) = self.update.as_mut() else {
+            return;
+        };
+        let UpdatePhase::Installing(rx) = &state.phase else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                tracing::info!("Update installed, restarting");
+                self.restart_requested.store(true, Ordering::SeqCst);
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Update failed: {}", e);
+                state.phase = UpdatePhase::Failed(e);
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                state.phase = UpdatePhase::Failed("installer thread died".to_string());
+            }
+        }
+    }
+
+    fn draw_update_view(&self, ui: &mut egui::Ui) {
+        let Some(state) = &self.update else {
+            return;
+        };
+        let amber = Color32::from_rgb(240, 180, 60);
+        let dim = Color32::from_rgb(180, 170, 150);
+
+        ui.label(
+            RichText::new("Update neowax")
+                .color(Color32::from_rgb(240, 200, 130))
+                .size(20.0),
+        );
+        ui.add_space(SPACER);
+        ui.label(
+            RichText::new(format!("Installed: {}", state.installed))
+                .color(dim)
+                .size(18.0),
+        );
+        ui.label(
+            RichText::new(format!("Package:   {}", state.info.version))
+                .color(amber)
+                .size(18.0),
+        );
+        match state.ordering {
+            VersionOrdering::Greater => {}
+            VersionOrdering::Equal => {
+                ui.label(
+                    RichText::new("Same version as installed")
+                        .color(Color32::from_rgb(200, 80, 30))
+                        .size(16.0),
+                );
+            }
+            VersionOrdering::Less => {
+                ui.label(
+                    RichText::new("Older than installed version!")
+                        .color(Color32::from_rgb(200, 80, 30))
+                        .size(16.0),
+                );
+            }
+        }
+        ui.add_space(SPACER * 2.0);
+
+        match &state.phase {
+            UpdatePhase::Confirm => {
+                for (i, label) in ["Install", "Cancel"].iter().enumerate() {
+                    let selected = state.selected == i;
+                    let _ = ui.selectable_label(
+                        selected,
+                        RichText::new(*label)
+                            .color(if selected {
+                                Color32::from_rgb(255, 220, 130)
+                            } else {
+                                Color32::from_rgb(200, 160, 60)
+                            })
+                            .size(20.0),
+                    );
+                }
+            }
+            UpdatePhase::Installing(_) => {
+                ui.label(RichText::new("Installing...").color(amber).size(20.0));
+            }
+            UpdatePhase::Failed(msg) => {
+                ui.label(
+                    RichText::new(format!("Install failed: {msg}"))
+                        .color(Color32::from_rgb(200, 80, 30))
+                        .size(16.0),
+                );
+                ui.add_space(SPACER);
+                ui.label(RichText::new("Press to go back").color(dim).size(16.0));
+            }
+        }
     }
 
     fn check_loaded_track(&mut self) {
@@ -736,6 +912,18 @@ impl NeowaxApp {
                 }
             }
 
+            if self.view == View::Update {
+                if let Some(state) = self.update.as_mut() {
+                    if matches!(state.phase, UpdatePhase::Confirm)
+                        && (scroll != 0.0
+                            || i.key_pressed(egui::Key::ArrowUp)
+                            || i.key_pressed(egui::Key::ArrowDown))
+                    {
+                        state.selected = 1 - state.selected;
+                    }
+                }
+            }
+
             if i.key_pressed(egui::Key::Enter) {
                 action = 1; // button pressed
             }
@@ -743,6 +931,20 @@ impl NeowaxApp {
 
         if action == 1 {
             match self.view {
+                View::Update => {
+                    let Some(state) = &self.update else {
+                        self.view = View::Library;
+                        return;
+                    };
+                    match state.phase {
+                        UpdatePhase::Confirm if state.selected == 0 => self.start_install(),
+                        UpdatePhase::Confirm | UpdatePhase::Failed(_) => {
+                            self.update = None;
+                            self.view = View::Library;
+                        }
+                        UpdatePhase::Installing(_) => {}
+                    }
+                }
                 View::Deck => {
                     // Button in deck view → open library
                     self.view = View::Library;
@@ -783,6 +985,7 @@ impl eframe::App for NeowaxApp {
         ctx.set_visuals(egui::Visuals::dark());
 
         self.check_loaded_track();
+        self.check_update_progress(ctx);
         self.update_from_engine();
         self.handle_input(ctx);
 
@@ -828,6 +1031,7 @@ impl eframe::App for NeowaxApp {
 
                 match self.view {
                     View::Deck => self.draw_deck_view(ui),
+                    View::Update => self.draw_update_view(ui),
                     View::Library => {
                         let lib_action = self.draw_library_view(ui);
                         match lib_action {
@@ -851,6 +1055,9 @@ fn main() -> Result<(), eframe::Error> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
+    if args.check_args {
+        return Ok(());
+    }
 
     let default_device = args.alsa.as_deref().unwrap_or("default");
     let input_device = args
@@ -881,6 +1088,7 @@ fn main() -> Result<(), eframe::Error> {
     tracing::info!("Scanned library in {:?}", args.library);
 
     let running = Arc::new(AtomicBool::new(true));
+    let restart_requested = Arc::new(AtomicBool::new(false));
     let mut engine = Engine::new(input_device, output_device, args.sample_rate);
     if let Some(buf) = args.buffer {
         engine.set_buffer_size(buf);
@@ -911,6 +1119,7 @@ fn main() -> Result<(), eframe::Error> {
         library_tree,
         args.sample_rate,
         timecode_resolution,
+        restart_requested.clone(),
     );
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/neowax-256.png"))
@@ -936,6 +1145,21 @@ fn main() -> Result<(), eframe::Error> {
     running.store(false, Ordering::SeqCst);
     capture_handle.join().ok();
     playback_handle.join().ok();
+
+    // After a successful update, replace this process with the new binary.
+    // Done after joining the audio threads so ALSA devices are released.
+    if restart_requested.load(Ordering::SeqCst) {
+        use std::os::unix::process::CommandExt;
+        match update::restart_path() {
+            Ok(exe) => {
+                let err = std::process::Command::new(exe)
+                    .args(std::env::args_os().skip(1))
+                    .exec();
+                tracing::error!("Failed to restart: {}", err);
+            }
+            Err(e) => tracing::error!("Failed to locate executable: {}", e),
+        }
+    }
 
     result
 }
