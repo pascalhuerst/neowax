@@ -86,6 +86,10 @@ pub struct DeckState {
     pub running: AtomicBool,
     /// Spinner monitor data (written by audio thread via try_lock)
     pub monitor: Mutex<Vec<u8>>,
+    /// Peak sample magnitude (L, R) of captured audio since last taken
+    input_peak: [AtomicU32; 2],
+    /// Peak sample magnitude (L, R) of played audio since last taken
+    output_peak: [AtomicU32; 2],
 }
 
 impl Default for DeckState {
@@ -104,7 +108,21 @@ impl DeckState {
             valid_counter: AtomicU32::new(0),
             running: AtomicBool::new(false),
             monitor: Mutex::new(Vec::new()),
+            input_peak: [AtomicU32::new(0), AtomicU32::new(0)],
+            output_peak: [AtomicU32::new(0), AtomicU32::new(0)],
         }
+    }
+
+    /// Peak levels since the last call, as `[in L, in R, out L, out R]`
+    /// in the range 0.0..=1.0. Resets the peaks.
+    pub fn take_peaks(&self) -> [f32; 4] {
+        let take = |a: &AtomicU32| a.swap(0, Ordering::Relaxed) as f32 / 32768.0;
+        [
+            take(&self.input_peak[0]),
+            take(&self.input_peak[1]),
+            take(&self.output_peak[0]),
+            take(&self.output_peak[1]),
+        ]
     }
 
     pub fn get_elapsed(&self) -> f64 {
@@ -283,6 +301,17 @@ impl Engine {
     }
 }
 
+/// Fold the peak magnitude of interleaved stereo samples into `peaks`.
+fn publish_peaks(peaks: &[AtomicU32; 2], samples: &[i16]) {
+    let (mut l, mut r) = (0u32, 0u32);
+    for frame in samples.as_chunks::<2>().0 {
+        l = l.max(frame[0].unsigned_abs() as u32);
+        r = r.max(frame[1].unsigned_abs() as u32);
+    }
+    peaks[0].fetch_max(l, Ordering::Relaxed);
+    peaks[1].fetch_max(r, Ordering::Relaxed);
+}
+
 fn run_capture_loop(
     input_pcm: alsa::PCM,
     mut timecoder: Timecoder,
@@ -303,6 +332,7 @@ fn run_capture_loop(
             Ok(frames) => {
                 let n = frames;
                 timecoder.submit(&capture_buf[..n * 2]);
+                publish_peaks(&state.input_peak, &capture_buf[..n * 2]);
 
                 // Publish timecoder state to playback thread
                 snapshot.write(&timecoder);
@@ -383,6 +413,8 @@ fn run_playback_loop(
 
         // Generate audio
         player.collect_with_state(&mut playback_buf, period_size, &tc_state);
+
+        publish_peaks(&state.output_peak, &playback_buf);
 
         // Write output
         match output_pcm.io_i16()?.writei(&playback_buf) {

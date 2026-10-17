@@ -14,6 +14,12 @@ use std::sync::{mpsc, Arc};
 
 const BORDER: f32 = 8.0;
 const SPACER: f32 = 6.0;
+/// Per-frame falloff of the peak meters (~20 dB/s at 60 fps)
+const METER_DECAY: f32 = 0.96;
+/// Width reserved for the "In" / "Out" meter labels
+const METER_LABEL_WIDTH: f32 = 32.0;
+/// Bottom of the meter scale in dB
+const METER_FLOOR_DB: f32 = -48.0;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "neowax - vinyl timecode DJ player")]
@@ -176,6 +182,9 @@ struct NeowaxApp {
     // Pitch history for calibration plot (ring buffer)
     pitch_history: VecDeque<f32>,
 
+    // Peak meters, held and decayed per frame: [in L, in R, out L, out R]
+    meters: [f32; 4],
+
     // Settings panel
     settings: SettingsState,
     accent_index: usize,
@@ -266,6 +275,7 @@ impl NeowaxApp {
             title_scroll_offset: 0.0,
             pitch_history: VecDeque::with_capacity(600),
             timecode_resolution,
+            meters: [0.0; 4],
             settings: SettingsState {
                 selected: 0,
                 pitch_open: false,
@@ -476,6 +486,11 @@ impl NeowaxApp {
     }
 
     fn update_from_engine(&mut self) {
+        let peaks = self.deck_state.take_peaks();
+        for (meter, peak) in self.meters.iter_mut().zip(peaks) {
+            *meter = peak.max(*meter * METER_DECAY);
+        }
+
         // If the track file disappeared (USB removed), clear the deck
         if let Some(path) = &self.track_path {
             if !path.exists() {
@@ -704,6 +719,50 @@ impl NeowaxApp {
         }
     }
 
+    /// Compact stereo peak meters for input (timecode) and output.
+    fn draw_meters(&self, ui: &mut egui::Ui) {
+        let label_color = Color32::from_rgb(180, 170, 150);
+        let bar_height = 6.0;
+        let gap = 2.0;
+
+        ui.horizontal(|ui| {
+            let half = (ui.available_width() - SPACER * 3.0) / 2.0;
+            for (name, pair) in [("In", &self.meters[0..2]), ("Out", &self.meters[2..4])] {
+                ui.add_sized(
+                    [METER_LABEL_WIDTH, 14.0],
+                    egui::Label::new(RichText::new(name).color(label_color).size(14.0)),
+                );
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2((half - METER_LABEL_WIDTH).max(20.0), bar_height * 2.0 + gap),
+                    egui::Sense::hover(),
+                );
+                let painter = ui.painter();
+                for (i, &peak) in pair.iter().enumerate() {
+                    let top = rect.top() + i as f32 * (bar_height + gap);
+                    let track = egui::Rect::from_min_size(
+                        egui::pos2(rect.left(), top),
+                        egui::vec2(rect.width(), bar_height),
+                    );
+                    painter.rect_filled(track, 0.0, Color32::from_rgb(20, 20, 20));
+
+                    let db = 20.0 * peak.max(1e-6).log10();
+                    let frac = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
+                    let color = if db > -3.0 {
+                        Color32::from_rgb(200, 80, 30)
+                    } else {
+                        self.accent.base()
+                    };
+                    let fill = egui::Rect::from_min_size(
+                        track.min,
+                        egui::vec2(track.width() * frac, bar_height),
+                    );
+                    painter.rect_filled(fill, 0.0, color);
+                }
+                ui.add_space(SPACER);
+            }
+        });
+    }
+
     fn draw_status(&self, ui: &mut egui::Ui) {
         if !self.status_message.is_empty() {
             ui.add_space(SPACER);
@@ -783,6 +842,8 @@ impl NeowaxApp {
                     }
                 }
 
+                ui.add_space(SPACER);
+                self.draw_meters(ui);
                 ui.separator();
                 let info_color = Color32::from_rgb(180, 170, 150);
                 ui.label(

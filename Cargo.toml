@@ -27,6 +27,7 @@ path = "src/bin/neowax_ui.rs"
 
 [package.metadata.deb]
 maintainer = "Pascal Huerst"
+extended-description = "Plays digital audio files in sync with a vinyl timecode record (Serato 2A) through ALSA."
 license-file = ["LICENSE", "0"]
 depends = "libasound2, libc6"
 section = "sound"
