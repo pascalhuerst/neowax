@@ -82,6 +82,10 @@ pub struct DeckState {
     pub timecode_pos: AtomicI32,
     /// Timecoder valid counter
     pub valid_counter: AtomicU32,
+    /// Set by the playback thread on track load/clear; the capture thread resets
+    /// the timecoder when it sees this, since the needle is lifted off the
+    /// control record while a new track is loaded and the old lock is no longer valid.
+    pub reset_timecoder: AtomicBool,
     /// Whether the realtime loop is running
     pub running: AtomicBool,
     /// Spinner monitor data (written by audio thread via try_lock)
@@ -106,6 +110,7 @@ impl DeckState {
             vinyl_pitch: AtomicU64::new(0),
             timecode_pos: AtomicI32::new(i32::MIN),
             valid_counter: AtomicU32::new(0),
+            reset_timecoder: AtomicBool::new(false),
             running: AtomicBool::new(false),
             monitor: Mutex::new(Vec::new()),
             input_peak: [AtomicU32::new(0), AtomicU32::new(0)],
@@ -328,6 +333,11 @@ fn run_capture_loop(
     tracing::info!("Capture loop started, period_size={}", period_size);
 
     while running.load(Ordering::Relaxed) {
+        if state.reset_timecoder.swap(false, Ordering::Relaxed) {
+            timecoder.reset();
+            tracing::info!("Timecoder reset for new track");
+        }
+
         match input_pcm.io_i16()?.readi(&mut capture_buf) {
             Ok(frames) => {
                 let n = frames;
@@ -399,10 +409,12 @@ fn run_playback_loop(
             match cmd {
                 TrackCommand::Load(track) => {
                     player.set_track(track);
+                    state.reset_timecoder.store(true, Ordering::Relaxed);
                     tracing::info!("Track loaded into player");
                 }
                 TrackCommand::Clear => {
                     player.clear_track();
+                    state.reset_timecoder.store(true, Ordering::Relaxed);
                     tracing::info!("Track cleared");
                 }
             }
