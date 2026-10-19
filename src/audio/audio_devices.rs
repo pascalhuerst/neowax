@@ -113,3 +113,19 @@ pub fn configure_audio_devices(settings: &AlsaSettings) -> Result<(PCM, PCM, usi
 
     Ok((capture, playback, buffer_size))
 }
+
+/// ALSA devices that can be selected for input and output: the system
+/// default plus one `plughw:<card id>` entry per sound card.
+pub fn list_alsa_devices() -> Vec<String> {
+    let mut devices = vec!["default".to_string()];
+    for card in alsa::card::Iter::new().flatten() {
+        let id = alsa::ctl::Ctl::from_card(&card, false)
+            .and_then(|ctl| ctl.card_info())
+            .and_then(|info| info.get_id().map(str::to_string));
+        match id {
+            Ok(id) => devices.push(format!("plughw:{id}")),
+            Err(e) => tracing::warn!("Cannot read sound card {}: {}", card.get_index(), e),
+        }
+    }
+    devices
+}

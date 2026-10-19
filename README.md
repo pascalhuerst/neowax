@@ -49,6 +49,12 @@ cargo build --release
 neowax-ui --alsa <device> --library <path-to-music>
 ```
 
+Both can also be chosen in the on-device Settings panel, so on a configured device plain `neowax-ui` is enough.
+
+```sh
+neowax-ui
+```
+
 ### Options
 
 | Option | Default | Description |
@@ -58,7 +64,7 @@ neowax-ui --alsa <device> --library <path-to-music>
 | `--output-device <device>` | | ALSA output device (overrides `--alsa`) |
 | `-s, --sample-rate <hz>` | 48000 | Sample rate |
 | `-t, --timecode <format>` | serato_2a | Timecode format |
-| `--library, --crate <path>` | | Directory to scan for audio files |
+| `--library, --crate <path>` | | Directory to scan for audio files (can also be chosen in Settings) |
 | `--geometry <WxH>` | | Window size (e.g. `800x480`) |
 | `--no-decor` | | Disable window decorations |
 | `--speed <multiplier>` | 1.0 | Vinyl speed multiplier |
@@ -71,11 +77,24 @@ neowax-ui --alsa <device> --library <path-to-music>
 
 ## Settings
 
-Settings changed in the on-device Settings panel (accent color, input channel swap) are saved to `~/.config/neowax/settings.toml` (or `$XDG_CONFIG_HOME/neowax/settings.toml`) right away. The file is plain TOML and can be edited by hand:
+Everything below can be changed in the on-device Settings panel (one encoder: scroll to move, click to select, click again to confirm a value; the touch screen works too). Changes are saved right away to `~/.config/neowax/settings.toml` (or `$XDG_CONFIG_HOME/neowax/settings.toml`). Settings marked `*` take effect after "Apply changes & restart".
+
+The file is plain TOML and can be edited by hand:
 
 ```toml
 accent = "Cyan"
 swap_input = false
+input_device = "plughw:sndrpihifiberry"
+output_device = "plughw:sndrpihifiberry"
+library = "/media/pi/MUSIC"
+timecode = "serato_2a"
+sample_rate = 48000
+speed = 1.0
+phono = false
+buffer = 256
+capture_buffer = 1024
+capture_cpu = 3
+playback_cpu = 2
 ```
 
 A command-line flag always wins over the file. A setting forced by a flag is shown greyed out in the panel, marked "(command line)", and can't be changed there; remove the flag from your launch command to manage it from the panel.

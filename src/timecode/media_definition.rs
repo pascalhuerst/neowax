@@ -202,6 +202,19 @@ impl TimecodeDef {
         self.lut.get(&bitstream)
     }
 
+    /// Names accepted by `find_definition`.
+    pub const NAMES: &'static [&'static str] = &[
+        "serato_cd",
+        "serato_2a",
+        "serato_2b",
+        "traktor_a",
+        "traktor_b",
+        "mixvibes_v2",
+        "mixvibes_7inch",
+        "pioneer_a",
+        "pioneer_b",
+    ];
+
     pub fn find_definition(name: &str) -> Option<Self> {
         match name {
             "serato_cd" => Some(Self::serato_cd()),

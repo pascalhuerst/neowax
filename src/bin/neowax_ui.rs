@@ -1,3 +1,6 @@
+#[path = "neowax_ui/settings_panel.rs"]
+mod settings_panel;
+
 use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
 use neowax::audio::{DeckState, Engine, Track, TrackCommand};
@@ -7,8 +10,9 @@ use neowax::sysinfo;
 use neowax::timecode::{ReverseDetector, TimecodeDef};
 use neowax::ui::{Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
 use neowax::update::{self, DebInfo};
+use settings_panel::SettingsState;
 use std::cmp::Ordering as VersionOrdering;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
@@ -25,7 +29,8 @@ const METER_FLOOR_DB: f32 = -48.0;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "neowax - vinyl timecode DJ player")]
 struct Args {
-    /// ALSA device for both input and output (e.g. "plughw:sndrpihifiberry")
+    /// ALSA device for both input and output (e.g. "plughw:sndrpihifiberry").
+    /// Overrides the settings file.
     #[arg(long)]
     alsa: Option<String>,
 
@@ -37,17 +42,17 @@ struct Args {
     #[arg(long)]
     output_device: Option<String>,
 
-    /// Sample rate in Hz
-    #[arg(short, long, default_value_t = 48000)]
-    sample_rate: u32,
+    /// Sample rate in Hz (default: 48000). Overrides the settings file.
+    #[arg(short, long)]
+    sample_rate: Option<u32>,
 
-    /// Timecode format
-    #[arg(short, long, default_value = "serato_2a")]
-    timecode: String,
+    /// Timecode format (default: serato_2a). Overrides the settings file.
+    #[arg(short, long)]
+    timecode: Option<String>,
 
-    /// Directory to scan for audio files
+    /// Directory to scan for audio files. Overrides the settings file.
     #[arg(long, alias = "crate")]
-    library: PathBuf,
+    library: Option<PathBuf>,
 
     /// Window geometry WxH (e.g. "800x480")
     #[arg(long)]
@@ -57,31 +62,32 @@ struct Args {
     #[arg(long)]
     no_decor: bool,
 
-    /// Vinyl speed multiplier
-    #[arg(long, default_value_t = 1.0)]
-    speed: f64,
+    /// Vinyl speed multiplier (default: 1.0). Overrides the settings file.
+    #[arg(long)]
+    speed: Option<f64>,
 
-    /// Phono-level input
+    /// Phono-level input. Overrides the settings file.
     #[arg(long)]
     phono: bool,
 
-    /// ALSA playback buffer size in frames (default: 256, ~5.3ms at 48kHz)
+    /// ALSA playback buffer size in frames (default: 256, ~5.3ms at 48kHz). Overrides the settings file.
     #[arg(long)]
     buffer: Option<u32>,
 
-    /// ALSA capture buffer size in frames (default: 1024, ~21ms at 48kHz)
+    /// ALSA capture buffer size in frames (default: 1024, ~21ms at 48kHz). Overrides the settings file.
     #[arg(long)]
     capture_buffer: Option<u32>,
 
-    /// CPU core to pin the capture thread to (default: 3)
-    #[arg(long, default_value_t = 3)]
-    capture_cpu: usize,
+    /// CPU core to pin the capture thread to (default: 3). Overrides the settings file.
+    #[arg(long)]
+    capture_cpu: Option<usize>,
 
-    /// CPU core to pin the playback thread to (default: 2)
-    #[arg(long, default_value_t = 2)]
-    playback_cpu: usize,
+    /// CPU core to pin the playback thread to (default: 2). Overrides the settings file.
+    #[arg(long)]
+    playback_cpu: Option<usize>,
 
-    /// Swap left/right of the timecode input (use if the record runs backwards)
+    /// Swap left/right of the timecode input (use if the record runs backwards).
+    /// Overrides the settings file.
     #[arg(long)]
     swap_input: bool,
 
@@ -102,26 +108,6 @@ enum View {
 const SEL_BACK: usize = usize::MAX - 2;
 const SEL_SETTINGS: usize = usize::MAX - 1;
 const SEL_RESCAN: usize = usize::MAX;
-
-#[derive(PartialEq, Clone, Copy)]
-enum SettingsRow {
-    Back,
-    Pitch,
-    Accent,
-    Update,
-    /// Only shown while reverse timecode is detected or the swap is active
-    SwapInput,
-}
-
-struct SettingsState {
-    /// Index into the currently visible rows
-    selected: usize,
-    pitch_open: bool,
-    /// A value row is being edited: the encoder changes the value, click confirms
-    editing: bool,
-    /// View to return to on [Back]
-    return_to: View,
-}
 
 enum UpdatePhase {
     /// Waiting for the user to pick Install or Cancel
@@ -162,7 +148,7 @@ struct NeowaxApp {
     load_progress: Arc<AtomicU32>,
 
     // Library
-    library_dir: PathBuf,
+    library_dir: Option<PathBuf>,
     library_tree: Vec<LibraryNode>,
     library_flat: Vec<FlatEntry>,
     selected_index: usize,
@@ -204,8 +190,12 @@ struct NeowaxApp {
     config: Settings,
     config_path: Option<PathBuf>,
     config_dirty: bool,
-    /// swap_input is forced by --swap-input and cannot be changed in the panel
-    swap_input_locked: bool,
+    /// What the process was started with: the file's values with command-line flags applied
+    startup: Settings,
+    /// Settings forced by a command-line flag; these can't be changed in the panel
+    locked: HashSet<&'static str>,
+    /// Close the window on the next frame (after "Apply & restart")
+    close_requested: bool,
     os_version: String,
     /// Best neowax .deb found while scanning the library
     available_update: Option<DebInfo>,
@@ -224,14 +214,15 @@ impl NeowaxApp {
     fn new(
         deck_state: Arc<DeckState>,
         track_sender: mpsc::Sender<TrackCommand>,
-        library_dir: PathBuf,
+        library_dir: Option<PathBuf>,
         scan: library::Scan,
         sample_rate: u32,
         timecode_resolution: f64,
         restart_requested: Arc<AtomicBool>,
         config: Settings,
         config_path: Option<PathBuf>,
-        swap_input_locked: bool,
+        startup: Settings,
+        locked: HashSet<&'static str>,
     ) -> Self {
         let library_tree = scan.tree;
         let library_flat = library::flatten_tree(&library_tree);
@@ -298,18 +289,15 @@ impl NeowaxApp {
             timecode_resolution,
             meters: [0.0; 4],
             reverse: ReverseDetector::new(),
-            settings: SettingsState {
-                selected: 0,
-                pitch_open: false,
-                editing: false,
-                return_to: View::Deck,
-            },
+            settings: SettingsState::new(),
             accent_index: 0,
             accent: Accent::default(),
             config,
             config_path,
             config_dirty: false,
-            swap_input_locked,
+            startup,
+            locked,
+            close_requested: false,
             os_version: sysinfo::os_version(),
             available_update: update::find_best(&scan.packages),
             status_message: String::new(),
@@ -337,9 +325,12 @@ impl NeowaxApp {
     }
 
     fn rescan_library(&mut self) {
+        let Some(dir) = &self.library_dir else {
+            return;
+        };
         // Touch the directory to trigger systemd automount if needed
-        let _ = std::fs::read_dir(&self.library_dir);
-        let scan = library::scan_directory(&self.library_dir);
+        let _ = std::fs::read_dir(dir);
+        let scan = library::scan_directory(dir);
         self.library_tree = scan.tree;
         self.available_update = update::find_best(&scan.packages);
         self.library_flat = library::flatten_tree(&self.library_tree);
@@ -714,255 +705,6 @@ impl NeowaxApp {
         });
     }
 
-    fn open_settings(&mut self) {
-        self.settings.return_to = self.view;
-        self.settings.selected = 0;
-        self.settings.editing = false;
-        self.view = View::Settings;
-    }
-
-    fn settings_rows(&self) -> Vec<SettingsRow> {
-        let mut rows = vec![SettingsRow::Back, SettingsRow::Pitch, SettingsRow::Accent];
-        if self.available_update.is_some() {
-            rows.push(SettingsRow::Update);
-        }
-        rows.push(SettingsRow::SwapInput);
-        rows
-    }
-
-    /// Show an accent color without touching the saved settings.
-    fn apply_accent(&mut self, index: usize) {
-        self.accent_index = index % ACCENT_PRESETS.len();
-        self.accent = Accent::from_preset(self.accent_index);
-        self.spinner.set_accent(self.accent);
-        self.waveform.set_accent(self.accent);
-    }
-
-    /// The user picked an accent color: show it and queue it for saving.
-    fn set_accent(&mut self, index: usize) {
-        self.apply_accent(index);
-        self.config.accent = ACCENT_PRESETS[self.accent_index].0.to_string();
-        self.config_dirty = true;
-    }
-
-    /// Write queued setting changes. Held back while a value is being edited
-    /// so scrolling through colors doesn't write to the SD card on every tick.
-    fn save_config_if_dirty(&mut self) {
-        if !self.config_dirty || self.settings.editing {
-            return;
-        }
-        self.config_dirty = false;
-        let Some(path) = &self.config_path else {
-            return;
-        };
-        if let Err(e) = self.config.save(path) {
-            tracing::error!("Failed to save settings: {:#}", e);
-            self.flash("Could not save settings");
-        }
-    }
-
-    fn step_accent(&mut self, delta: isize) {
-        let n = ACCENT_PRESETS.len() as isize;
-        self.set_accent((self.accent_index as isize + delta).rem_euclid(n) as usize);
-    }
-
-    /// The encoder was clicked (or the row tapped) on a settings row.
-    fn activate_setting(&mut self, row: SettingsRow) {
-        match row {
-            SettingsRow::Back => {
-                self.settings.editing = false;
-                self.view = self.settings.return_to;
-            }
-            SettingsRow::Pitch => self.settings.pitch_open = !self.settings.pitch_open,
-            SettingsRow::Accent => self.settings.editing = !self.settings.editing,
-            SettingsRow::SwapInput => {
-                if self.swap_input_locked {
-                    self.flash("Set on the command line (--swap-input)");
-                } else {
-                    let swapped = !self.deck_state.swap_input.load(Ordering::Relaxed);
-                    self.deck_state.swap_input.store(swapped, Ordering::Relaxed);
-                    self.config.swap_input = swapped;
-                    self.config_dirty = true;
-                }
-            }
-            SettingsRow::Update => {
-                if self.is_deck_active() {
-                    self.flash("Stop the deck first!");
-                } else if let Some(info) = self.available_update.clone() {
-                    self.begin_update(info);
-                }
-            }
-        }
-    }
-
-    /// Compact stereo peak meters for input (timecode) and output.
-    fn draw_meters(&self, ui: &mut egui::Ui) {
-        let label_color = Color32::from_rgb(180, 170, 150);
-        let bar_height = 6.0;
-        let gap = 2.0;
-
-        ui.horizontal(|ui| {
-            let half = (ui.available_width() - SPACER * 3.0) / 2.0;
-            for (name, pair) in [("In", &self.meters[0..2]), ("Out", &self.meters[2..4])] {
-                ui.add_sized(
-                    [METER_LABEL_WIDTH, 14.0],
-                    egui::Label::new(RichText::new(name).color(label_color).size(14.0)),
-                );
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2((half - METER_LABEL_WIDTH).max(20.0), bar_height * 2.0 + gap),
-                    egui::Sense::hover(),
-                );
-                let painter = ui.painter();
-                for (i, &peak) in pair.iter().enumerate() {
-                    let top = rect.top() + i as f32 * (bar_height + gap);
-                    let track = egui::Rect::from_min_size(
-                        egui::pos2(rect.left(), top),
-                        egui::vec2(rect.width(), bar_height),
-                    );
-                    painter.rect_filled(track, 0.0, Color32::from_rgb(20, 20, 20));
-
-                    let db = 20.0 * peak.max(1e-6).log10();
-                    let frac = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
-                    let color = if db > -3.0 {
-                        Color32::from_rgb(200, 80, 30)
-                    } else {
-                        self.accent.base()
-                    };
-                    let fill = egui::Rect::from_min_size(
-                        track.min,
-                        egui::vec2(track.width() * frac, bar_height),
-                    );
-                    painter.rect_filled(fill, 0.0, color);
-                }
-                ui.add_space(SPACER);
-            }
-        });
-    }
-
-    fn draw_status(&self, ui: &mut egui::Ui) {
-        if !self.status_message.is_empty() {
-            ui.add_space(SPACER);
-            ui.label(
-                RichText::new(&self.status_message)
-                    .color(Color32::from_rgb(200, 80, 30))
-                    .size(16.0),
-            );
-        }
-    }
-
-    /// Returns the row that was tapped, if any.
-    fn draw_settings_view(&self, ui: &mut egui::Ui) -> Option<(usize, SettingsRow)> {
-        let rows = self.settings_rows();
-        let mut clicked = None;
-
-        ui.label(
-            RichText::new("Settings")
-                .color(self.accent.bright())
-                .size(20.0),
-        );
-        ui.add_space(4.0);
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .enable_scrolling(false)
-            .show(ui, |ui| {
-                let mut meters_drawn = false;
-                for (idx, &row) in rows.iter().enumerate() {
-                    let selected = idx == self.settings.selected;
-                    let text = match row {
-                        SettingsRow::Back => "[Back]".to_string(),
-                        SettingsRow::Pitch => {
-                            let fold = if self.settings.pitch_open { "v" } else { ">" };
-                            format!("{fold} Pitch")
-                        }
-                        SettingsRow::Accent => {
-                            let name = ACCENT_PRESETS[self.accent_index].0;
-                            if selected && self.settings.editing {
-                                format!("Accent color: < {name} >")
-                            } else {
-                                format!("Accent color: {name}")
-                            }
-                        }
-                        SettingsRow::SwapInput => {
-                            let swapped = self.deck_state.swap_input.load(Ordering::Relaxed);
-                            let state = if swapped { "on" } else { "off" };
-                            if self.swap_input_locked {
-                                format!("Swap input L/R: {state} (command line)")
-                            } else if self.reverse.detected() && !swapped {
-                                "! Timecode runs backwards: swap input L/R".to_string()
-                            } else {
-                                format!("Swap input L/R: {state}")
-                            }
-                        }
-                        SettingsRow::Update => {
-                            let version = self.available_update.as_ref().map_or("", |u| &u.version);
-                            format!("Install update: {version}")
-                        }
-                    };
-
-                    // Meters sit right above the channel-swap warning
-                    if row == SettingsRow::SwapInput && !meters_drawn {
-                        self.draw_meters(ui);
-                        ui.add_space(SPACER);
-                        meters_drawn = true;
-                    }
-
-                    let locked = row == SettingsRow::SwapInput && self.swap_input_locked;
-                    let warning = row == SettingsRow::SwapInput
-                        && self.reverse.detected()
-                        && !self.deck_state.swap_input.load(Ordering::Relaxed);
-                    ui.horizontal(|ui| {
-                        let response = ui.selectable_label(
-                            selected,
-                            RichText::new(text)
-                                .color(if locked {
-                                    Color32::from_rgb(110, 110, 110)
-                                } else if warning {
-                                    Color32::from_rgb(200, 80, 30)
-                                } else if selected {
-                                    self.accent.bright()
-                                } else {
-                                    self.accent.mid()
-                                })
-                                .size(16.0),
-                        );
-                        if row == SettingsRow::Accent {
-                            let (rect, _) = ui
-                                .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                            ui.painter().rect_filled(rect, 3.0, self.accent.base());
-                        }
-                        if selected {
-                            response.scroll_to_me(Some(egui::Align::Center));
-                        }
-                        if response.clicked() {
-                            clicked = Some((idx, row));
-                        }
-                    });
-
-                    if row == SettingsRow::Pitch && self.settings.pitch_open {
-                        self.draw_pitch_plot(ui, 120.0);
-                        ui.add_space(4.0);
-                    }
-                }
-
-                if !meters_drawn {
-                    ui.add_space(SPACER);
-                    self.draw_meters(ui);
-                }
-                ui.separator();
-                let info_color = Color32::from_rgb(180, 170, 150);
-                ui.label(
-                    RichText::new(format!("neowax {}", env!("CARGO_PKG_VERSION")))
-                        .color(info_color)
-                        .size(14.0),
-                );
-                ui.label(RichText::new(&self.os_version).color(info_color).size(14.0));
-            });
-
-        self.draw_status(ui);
-        clicked
-    }
-
     fn draw_pitch_plot(&self, ui: &mut egui::Ui, height: f32) {
         let width = ui.available_width();
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
@@ -1214,19 +956,13 @@ impl NeowaxApp {
             if self.view == View::Settings {
                 if self.settings.editing {
                     if down {
-                        self.step_accent(1);
+                        self.step_selected_setting(1);
                     }
                     if up {
-                        self.step_accent(-1);
+                        self.step_selected_setting(-1);
                     }
                 } else {
-                    let last = self.settings_rows().len() - 1;
-                    if up {
-                        self.settings.selected = self.settings.selected.saturating_sub(1);
-                    }
-                    if down {
-                        self.settings.selected = (self.settings.selected + 1).min(last);
-                    }
+                    self.move_settings_selection(up, down);
                 }
             }
 
@@ -1263,12 +999,7 @@ impl NeowaxApp {
                         UpdatePhase::Installing(_) => {}
                     }
                 }
-                View::Settings => {
-                    let rows = self.settings_rows();
-                    if let Some(&row) = rows.get(self.settings.selected) {
-                        self.activate_setting(row);
-                    }
-                }
+                View::Settings => self.activate_selected_setting(),
                 View::Deck => {
                     // Button in deck view → open library
                     self.view = View::Library;
@@ -1314,7 +1045,13 @@ impl eframe::App for NeowaxApp {
         self.update_from_engine(ctx.input(|i| i.predicted_dt));
         self.handle_input(ctx);
 
+        if self.view == View::Settings {
+            self.clamp_settings_selection();
+        }
         self.save_config_if_dirty();
+        if self.close_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
 
         // Decay status message
         if self.status_timer > 0.0 {
@@ -1360,13 +1097,8 @@ impl eframe::App for NeowaxApp {
                     View::Deck => self.draw_deck_view(ui),
                     View::Update => self.draw_update_view(ui),
                     View::Settings => {
-                        if let Some((idx, row)) = self.draw_settings_view(ui) {
-                            self.settings.selected = idx;
-                            match row {
-                                // Touch: tapping the color cycles it
-                                SettingsRow::Accent => self.step_accent(1),
-                                _ => self.activate_setting(row),
-                            }
+                        if let Some(idx) = self.draw_settings_view(ui) {
+                            self.tap_setting(idx);
                         }
                     }
                     View::Library => {
@@ -1397,18 +1129,6 @@ fn main() -> Result<(), eframe::Error> {
         return Ok(());
     }
 
-    let default_device = args.alsa.as_deref().unwrap_or("default");
-    let input_device = args
-        .input_device
-        .as_deref()
-        .unwrap_or(default_device)
-        .to_string();
-    let output_device = args
-        .output_device
-        .as_deref()
-        .unwrap_or(default_device)
-        .to_string();
-
     let (win_w, win_h) = args
         .geometry
         .as_deref()
@@ -1422,56 +1142,111 @@ fn main() -> Result<(), eframe::Error> {
         })
         .unwrap_or((1024.0, 600.0));
 
-    let scan = library::scan_directory(&args.library);
-    tracing::info!("Scanned library in {:?}", args.library);
-
-    let running = Arc::new(AtomicBool::new(true));
-    let restart_requested = Arc::new(AtomicBool::new(false));
-    let mut engine = Engine::new(input_device, output_device, args.sample_rate);
-    if let Some(buf) = args.buffer {
-        engine.set_buffer_size(buf);
-    }
-    if let Some(buf) = args.capture_buffer {
-        engine.set_capture_buffer_size(buf);
-    }
-    let deck_state = engine.state.clone();
-
-    // CLI flags override the settings file; overridden settings are locked in the panel
+    // Settings file, then command-line flags on top. A setting given on the
+    // command line is "locked": the panel shows it greyed out and the file's
+    // own value is left alone.
     let config_path = Settings::default_path();
     let config = config_path
         .as_deref()
         .map(Settings::load)
         .unwrap_or_default();
-    let swap_input_locked = args.swap_input;
+    let mut startup = config.clone();
+    let mut locked: HashSet<&'static str> = HashSet::new();
+    macro_rules! cli_override {
+        ($key:literal, $field:ident) => {
+            if let Some(value) = args.$field.clone() {
+                startup.$field = value;
+                locked.insert($key);
+            }
+        };
+    }
+    if let Some(device) = args.alsa.clone() {
+        startup.input_device = device.clone();
+        startup.output_device = device;
+        locked.insert("input_device");
+        locked.insert("output_device");
+    }
+    cli_override!("input_device", input_device);
+    cli_override!("output_device", output_device);
+    if let Some(dir) = args.library.clone() {
+        startup.library = Some(dir);
+        locked.insert("library");
+    }
+    cli_override!("sample_rate", sample_rate);
+    cli_override!("timecode", timecode);
+    cli_override!("speed", speed);
+    cli_override!("buffer", buffer);
+    cli_override!("capture_buffer", capture_buffer);
+    cli_override!("capture_cpu", capture_cpu);
+    cli_override!("playback_cpu", playback_cpu);
+    if args.phono {
+        startup.phono = true;
+        locked.insert("phono");
+    }
+    if args.swap_input {
+        startup.swap_input = true;
+        locked.insert("swap_input");
+    }
+    if TimecodeDef::find_definition(&startup.timecode).is_none() {
+        tracing::warn!("Unknown timecode {:?}, using the default", startup.timecode);
+        startup.timecode = Settings::default().timecode;
+    }
+
+    let scan = match &startup.library {
+        Some(dir) => {
+            let scan = library::scan_directory(dir);
+            tracing::info!("Scanned library in {:?}", dir);
+            scan
+        }
+        None => {
+            tracing::warn!("No music library configured (--library or Settings > System)");
+            library::Scan {
+                tree: Vec::new(),
+                packages: Vec::new(),
+            }
+        }
+    };
+
+    let running = Arc::new(AtomicBool::new(true));
+    let restart_requested = Arc::new(AtomicBool::new(false));
+    let mut engine = Engine::new(
+        startup.input_device.clone(),
+        startup.output_device.clone(),
+        startup.sample_rate,
+    );
+    engine.set_buffer_size(startup.buffer);
+    engine.set_capture_buffer_size(startup.capture_buffer);
+    let deck_state = engine.state.clone();
     deck_state
         .swap_input
-        .store(args.swap_input || config.swap_input, Ordering::Relaxed);
+        .store(startup.swap_input, Ordering::Relaxed);
 
     let (capture_handle, playback_handle, track_sender) = engine.run(
         running.clone(),
         None,
-        &args.timecode,
-        args.speed,
-        args.phono,
-        args.capture_cpu,
-        args.playback_cpu,
+        &startup.timecode,
+        startup.speed,
+        startup.phono,
+        startup.capture_cpu,
+        startup.playback_cpu,
     );
 
-    let timecode_resolution = TimecodeDef::find_definition(&args.timecode)
-        .map(|def| def.resolution as f64 * args.speed)
+    let timecode_resolution = TimecodeDef::find_definition(&startup.timecode)
+        .map(|def| def.resolution as f64 * startup.speed)
         .unwrap_or(1000.0);
 
     let app = NeowaxApp::new(
         deck_state,
         track_sender,
-        args.library.clone(),
+        startup.library.clone(),
         scan,
-        args.sample_rate,
+        startup.sample_rate,
         timecode_resolution,
         restart_requested.clone(),
         config,
         config_path,
-        swap_input_locked,
+        startup,
+        locked,
     );
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/neowax-256.png"))
