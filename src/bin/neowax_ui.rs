@@ -5,6 +5,7 @@ use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
 use neowax::audio::{DeckState, Engine, Track, TrackCommand};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
+use neowax::online::{self, OnlineRelease};
 use neowax::settings::Settings;
 use neowax::sysinfo;
 use neowax::timecode::{ReverseDetector, TimecodeDef};
@@ -134,6 +135,16 @@ const SEL_BACK: usize = usize::MAX - 2;
 const SEL_SETTINGS: usize = usize::MAX - 1;
 const SEL_RESCAN: usize = usize::MAX;
 
+/// Progress of the optional online update check and download.
+enum OnlineState {
+    Idle,
+    Checking(mpsc::Receiver<Result<Option<OnlineRelease>, String>>),
+    UpToDate,
+    Available(OnlineRelease),
+    Failed(String),
+    Downloading(OnlineRelease, mpsc::Receiver<Result<PathBuf, String>>),
+}
+
 enum UpdatePhase {
     /// Waiting for the user to pick Install or Cancel
     Confirm,
@@ -224,6 +235,7 @@ struct NeowaxApp {
     os_version: String,
     /// Best neowax .deb found while scanning the library
     available_updates: Vec<UpdateCandidate>,
+    online: OnlineState,
     /// Version of the installed package, to compare update candidates with
     installed_version: String,
 
@@ -328,6 +340,7 @@ impl NeowaxApp {
             close_requested: false,
             os_version: sysinfo::os_version(),
             installed_version: installed_version.clone(),
+            online: OnlineState::Idle,
             available_updates: update::find_updates(&scan.packages, &installed_version),
             status_message: String::new(),
             status_timer: 0.0,
@@ -346,6 +359,7 @@ impl NeowaxApp {
                 0
             });
         app.apply_accent(accent);
+        app.start_online_check();
         app
     }
 
@@ -401,6 +415,105 @@ impl NeowaxApp {
     }
 
     /// Open the update view for a neowax package found in the library.
+    /// Ask GitHub for a newer release, if the user enabled online updates.
+    /// Runs in the background; a failed attempt is retried twice, since the
+    /// network may still be coming up right after boot.
+    fn start_online_check(&mut self) {
+        if !self.config.online_updates {
+            self.online = OnlineState::Idle;
+            return;
+        }
+        if matches!(
+            self.online,
+            OnlineState::Checking(_) | OnlineState::Downloading(..)
+        ) {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut result = Err("no attempt made".to_string());
+            for attempt in 0..3 {
+                result = online::latest_release().map_err(|e| format!("{e:#}"));
+                if result.is_ok() {
+                    break;
+                }
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_secs(20));
+                }
+            }
+            tx.send(result).ok();
+        });
+        self.online = OnlineState::Checking(rx);
+    }
+
+    fn start_online_download(&mut self) {
+        let OnlineState::Available(release) = &self.online else {
+            return;
+        };
+        let release = release.clone();
+        let for_thread = release.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let dir = std::env::temp_dir().join("neowax-update");
+            tx.send(online::download(&for_thread, &dir).map_err(|e| format!("{e:#}")))
+                .ok();
+        });
+        self.online = OnlineState::Downloading(release, rx);
+    }
+
+    fn check_online_progress(&mut self) {
+        match &self.online {
+            OnlineState::Checking(rx) => match rx.try_recv() {
+                Ok(Ok(Some(release))) => {
+                    let newer = update::compare_versions(&release.version, &self.installed_version)
+                        .is_ok_and(|o| o == VersionOrdering::Greater);
+                    self.online = if newer {
+                        OnlineState::Available(release)
+                    } else {
+                        OnlineState::UpToDate
+                    };
+                }
+                Ok(Ok(None)) => {
+                    self.online = OnlineState::Failed("no package for this device".to_string());
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Online update check failed: {}", e);
+                    self.online = OnlineState::Failed(e);
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.online = OnlineState::Failed("check aborted".to_string());
+                }
+            },
+            OnlineState::Downloading(release, rx) => {
+                let outcome = match rx.try_recv() {
+                    Ok(outcome) => outcome,
+                    Err(mpsc::TryRecvError::Empty) => return,
+                    Err(mpsc::TryRecvError::Disconnected) => Err("download aborted".to_string()),
+                };
+                let release = release.clone();
+                let package = outcome.and_then(|path| {
+                    let info = update::inspect(&path).map_err(|e| format!("{e:#}"))?;
+                    let ordering = update::compare_versions(&info.version, &self.installed_version)
+                        .map_err(|e| format!("{e:#}"))?;
+                    Ok(UpdateCandidate { info, ordering })
+                });
+                match package {
+                    Ok(candidate) => {
+                        self.online = OnlineState::Available(release);
+                        self.begin_update(candidate);
+                    }
+                    Err(e) => {
+                        tracing::error!("Online update download failed: {}", e);
+                        self.flash(format!("Download failed: {e}"));
+                        self.online = OnlineState::Available(release);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn begin_update(&mut self, candidate: UpdateCandidate) {
         self.update = Some(UpdateState {
             info: candidate.info,
@@ -1082,6 +1195,7 @@ impl eframe::App for NeowaxApp {
 
         self.check_loaded_track();
         self.check_update_progress(ctx);
+        self.check_online_progress();
         self.update_from_engine(ctx.input(|i| i.predicted_dt));
         self.handle_input(ctx);
 

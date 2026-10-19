@@ -23,6 +23,8 @@ pub struct Settings {
     pub input_device: String,
     /// ALSA playback device
     pub output_device: String,
+    /// Look for new releases on GitHub (needs internet; off unless enabled)
+    pub online_updates: bool,
     /// Directory scanned for music
     #[serde(skip_serializing_if = "Option::is_none")]
     pub library: Option<PathBuf>,
@@ -58,6 +60,7 @@ impl Default for Settings {
             timecode_enabled: true,
             input_device: "default".to_string(),
             output_device: "default".to_string(),
+            online_updates: false,
             library: None,
             timecode: "serato_2a".to_string(),
             sample_rate: 48000,

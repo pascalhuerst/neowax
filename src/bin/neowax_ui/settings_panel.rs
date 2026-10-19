@@ -31,6 +31,10 @@ pub enum SettingId {
     Update,
     /// Fold-out listing several available packages
     GroupUpdates,
+    /// A newer release found on GitHub
+    OnlineUpdate,
+    OnlineUpdates,
+    OnlineCheck,
     /// One entry of that list (index into `available_updates`)
     UpdateVersion(usize),
     Meters,
@@ -258,6 +262,8 @@ impl NeowaxApp {
             SettingId::Apply => "Apply changes & restart",
             SettingId::Update | SettingId::UpdateVersion(_) => "Install update",
             SettingId::GroupUpdates => "Updates",
+            SettingId::OnlineUpdate | SettingId::OnlineCheck => "",
+            SettingId::OnlineUpdates => "Online update check",
             SettingId::SwapInput => "Swap input L/R",
             SettingId::TimecodeEnabled => "Timecode control",
             SettingId::GroupAudio => "Audio",
@@ -292,6 +298,7 @@ impl NeowaxApp {
             }
             SettingId::InputDevice => s.input_device.clone(),
             SettingId::OutputDevice => s.output_device.clone(),
+            SettingId::OnlineUpdates => on_off(s.online_updates).to_string(),
             SettingId::Library => s
                 .library
                 .as_ref()
@@ -395,6 +402,12 @@ impl NeowaxApp {
                 self.config.swap_input = swapped;
             }
             SettingId::Phono => self.config.phono = !self.config.phono,
+            SettingId::OnlineUpdates => {
+                self.config.online_updates = !self.config.online_updates;
+                // Turning it on checks right away; turning it off forgets the result
+                self.online = OnlineState::Idle;
+                self.start_online_check();
+            }
             SettingId::TimecodeEnabled => {
                 let enabled = !self.deck_state.timecode_enabled.load(Ordering::Relaxed);
                 self.deck_state
@@ -423,6 +436,22 @@ impl NeowaxApp {
             row.style = RowStyle::Warning;
             rows.push(row);
         }
+        if self.config.online_updates {
+            match &self.online {
+                OnlineState::Available(release) => rows.push(Row::new(
+                    SettingId::OnlineUpdate,
+                    RowKind::Action,
+                    &format!("Download update: {} (online)", release.version),
+                )),
+                OnlineState::Downloading(release, _) => rows.push(Row::new(
+                    SettingId::OnlineUpdate,
+                    RowKind::Action,
+                    &format!("Downloading {}...", release.version),
+                )),
+                _ => {}
+            }
+        }
+
         match self.available_updates.as_slice() {
             [] => {}
             [only] => rows.push(Row::new(
@@ -454,7 +483,14 @@ impl NeowaxApp {
 
         let groups: [(SettingId, &[SettingId]); 4] = [
             (SettingId::GroupAudio, AUDIO_ROWS),
-            (SettingId::GroupSystem, &[SettingId::Library]),
+            (
+                SettingId::GroupSystem,
+                &[
+                    SettingId::Library,
+                    SettingId::OnlineUpdates,
+                    SettingId::OnlineCheck,
+                ],
+            ),
             (SettingId::GroupDisplay, &[SettingId::Accent]),
             (SettingId::GroupPitch, &[SettingId::PitchPlot]),
         ];
@@ -462,14 +498,24 @@ impl NeowaxApp {
             rows.push(Row::new(group, RowKind::Group, Self::label(group)));
             if self.settings.open.contains(&group) {
                 for &id in children {
+                    if id == SettingId::OnlineCheck && !self.config.online_updates {
+                        continue;
+                    }
                     let kind = match id {
-                        SettingId::Phono | SettingId::SwapInput | SettingId::TimecodeEnabled => {
-                            RowKind::Toggle
-                        }
+                        SettingId::Phono
+                        | SettingId::SwapInput
+                        | SettingId::TimecodeEnabled
+                        | SettingId::OnlineUpdates => RowKind::Toggle,
+                        SettingId::OnlineCheck => RowKind::Action,
                         SettingId::PitchPlot | SettingId::Meters => RowKind::Display,
                         _ => RowKind::Choice,
                     };
-                    let mut row = Row::new(id, kind, Self::label(id));
+                    let label = if id == SettingId::OnlineCheck {
+                        self.online_check_text()
+                    } else {
+                        Self::label(id).to_string()
+                    };
+                    let mut row = Row::new(id, kind, &label);
                     row.depth = 1;
                     if self.is_locked(id) {
                         row.style = RowStyle::Locked;
@@ -496,6 +542,17 @@ impl NeowaxApp {
         );
         row.style = RowStyle::Warning;
         Some(row)
+    }
+
+    fn online_check_text(&self) -> String {
+        match &self.online {
+            OnlineState::Idle => "Check for updates now".to_string(),
+            OnlineState::Checking(_) => "Checking for updates...".to_string(),
+            OnlineState::UpToDate => "Up to date (check again)".to_string(),
+            OnlineState::Available(_) => "Update available (check again)".to_string(),
+            OnlineState::Failed(e) => format!("Check failed: {e} (retry)"),
+            OnlineState::Downloading(..) => "Downloading...".to_string(),
+        }
     }
 
     fn update_text(candidate: &UpdateCandidate, in_list: bool) -> String {
@@ -625,6 +682,14 @@ impl NeowaxApp {
                     self.flash("Stop the deck first!");
                 } else if let Some(candidate) = self.available_updates.get(index).cloned() {
                     self.begin_update(candidate);
+                }
+            }
+            SettingId::OnlineCheck => self.start_online_check(),
+            SettingId::OnlineUpdate => {
+                if self.is_deck_active() {
+                    self.flash("Stop the deck first!");
+                } else {
+                    self.start_online_download();
                 }
             }
             SettingId::Apply => {

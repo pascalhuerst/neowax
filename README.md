@@ -98,7 +98,8 @@ What the package provides:
 - **`neowax.service`**: starts on boot, restarts on crash. Logs: `journalctl -u neowax`. Stop it with `sudo systemctl stop neowax` (tty1 then returns to a login prompt once you also run `sudo systemctl start getty@tty1`).
 - **USB automount**: a udev rule mounts USB drives with a filesystem under `/media/<device>` (read as the music library by default). Drives are mounted `nosuid,nodev,noexec`.
 - **Settings**: stored in `/var/lib/neowax/.config/neowax/settings.toml`; choose the sound card and library in the on-device Settings panel. Extra command-line flags can go in `/etc/default/neowax` (`NEOWAX_ARGS`), but anything set there is locked in the panel.
-- **Updates**: put a newer `neowax_*.deb` on a USB drive. The Settings panel shows "Install update"; it installs through a small root helper (`/usr/lib/neowax/install-update`, allowed via `/etc/sudoers.d/neowax`) that only accepts `neowax` packages. Anyone who can plug a drive into the device can therefore run code as root, so treat the box as physically trusted.
+- **Online updates** (off by default): enable "Online update check" in Settings > System and neowax asks GitHub for the latest release at startup (and on "Check for updates now"). A newer package shows up as "Download update"; it is fetched over HTTPS, its checksum verified, and then goes through the same confirm-and-install step as below. Needs `curl` and an internet connection.
+- **Updates from USB**: put a newer `neowax_*.deb` on a USB drive. The Settings panel shows "Install update"; it installs through a small root helper (`/usr/lib/neowax/install-update`, allowed via `/etc/sudoers.d/neowax`) that only accepts `neowax` packages. Anyone who can plug a drive into the device can therefore run code as root, so treat the box as physically trusted.
 
 ## Settings
 
@@ -117,6 +118,7 @@ timecode = "serato_2a"
 sample_rate = 48000
 speed = 1.0
 phono = false
+online_updates = false
 buffer = 256
 capture_buffer = 1024
 capture_cpu = 3

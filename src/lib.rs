@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod audiofile;
 pub mod library;
+pub mod online;
 pub mod settings;
 pub mod sysinfo;
 pub mod timecode;

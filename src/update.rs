@@ -194,7 +194,7 @@ pub fn restart_path() -> Result<PathBuf> {
     Ok(PathBuf::from(s.strip_suffix(" (deleted)").unwrap_or(&s)))
 }
 
-fn command_stdout(cmd: &str, args: &[&str]) -> Result<String> {
+pub(crate) fn command_stdout(cmd: &str, args: &[&str]) -> Result<String> {
     let out = Command::new(cmd)
         .args(args)
         .output()
