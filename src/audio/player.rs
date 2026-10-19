@@ -82,6 +82,8 @@ pub struct Player {
     volume: f64,
     /// Calibrate offset on next valid timecode position
     needs_calibration: bool,
+    /// Play the track at normal speed from the start, ignoring the timecode
+    free_run: bool,
 }
 
 impl Player {
@@ -97,7 +99,23 @@ impl Player {
             sync_pitch: 1.0,
             volume: 0.0,
             needs_calibration: true,
+            free_run: false,
         }
+    }
+
+    /// Switch between timecode control and free-running playback. A change
+    /// restarts from a clean state; the loaded track is kept.
+    pub fn set_free_run(&mut self, free_run: bool) {
+        if self.free_run == free_run {
+            return;
+        }
+        self.free_run = free_run;
+        self.position = 0.0;
+        self.offset = 0.0;
+        self.pitch = 0.0;
+        self.sync_pitch = 1.0;
+        self.target_position = f64::INFINITY;
+        self.needs_calibration = true;
     }
 
     pub fn set_track(&mut self, track: Arc<Track>) {
@@ -235,6 +253,11 @@ impl Player {
     /// Get a block of PCM audio using a pre-built timecode state snapshot.
     /// Used by the playback thread in the two-thread engine.
     pub fn collect_with_state(&mut self, pcm: &mut [i16], samples: usize, state: &TimecodeState) {
+        if self.free_run {
+            self.collect_free_run(pcm, samples);
+            return;
+        }
+
         let dt = self.sample_dt * samples as f64;
 
         self.sync_to_state(state);
@@ -269,6 +292,37 @@ impl Player {
         self.volume = target_volume;
     }
 
+    /// Play the track from the start at normal speed, stopping at its end.
+    /// A newly set track starts right away.
+    fn collect_free_run(&mut self, pcm: &mut [i16], samples: usize) {
+        let end = self.track.as_ref().map(|t| t.length as f64 / t.rate as f64);
+        let playing = end.is_some_and(|end| self.position < end);
+
+        self.pitch = if playing { 1.0 } else { 0.0 };
+        self.sync_pitch = 1.0;
+        let target_volume = if playing { VOLUME } else { 0.0 };
+
+        match &self.track {
+            Some(track) => {
+                let advanced = self.build_pcm(
+                    pcm,
+                    samples,
+                    track,
+                    self.position,
+                    self.pitch,
+                    self.volume,
+                    target_volume,
+                );
+                self.position += advanced;
+            }
+            None => pcm[..samples * PLAYER_CHANNELS].fill(0),
+        }
+        if let Some(end) = end {
+            self.position = self.position.min(end);
+        }
+        self.volume = target_volume;
+    }
+
     /// Get a block of PCM audio data to send to the soundcard.
     /// Convenience wrapper that reads state directly from a Timecoder reference.
     pub fn collect(&mut self, pcm: &mut [i16], samples: usize, timecoder: &Timecoder) {
@@ -297,6 +351,74 @@ mod tests {
             pcm.push(s); // right
         }
         Track::from_pcm(pcm, rate)
+    }
+
+    fn idle_timecode_state() -> TimecodeState {
+        TimecodeState {
+            pitch: 0.0,
+            position: None,
+            safe: 0,
+            resolution: 1000.0,
+        }
+    }
+
+    #[test]
+    fn free_run_plays_from_the_start_and_stops_at_the_end() {
+        let mut player = Player::new(44100);
+        player.set_free_run(true);
+        player.set_track(make_test_track()); // 10 s
+
+        let period = 441; // 10 ms
+        let mut buf = vec![0i16; period * 2];
+        let state = idle_timecode_state();
+
+        // The first second plays right away, with the timecode idle
+        let mut peak = 0i16;
+        for _ in 0..100 {
+            player.collect_with_state(&mut buf, period, &state);
+            peak = peak.max(buf.iter().copied().max().unwrap_or(0));
+        }
+        assert!((player.get_elapsed() - 1.0).abs() < 0.02);
+        assert!((player.get_effective_pitch() - 1.0).abs() < 1e-9);
+        assert!(peak > 10_000, "expected audible output, peak {peak}");
+
+        // Run past the end: it stops and holds the end position
+        for _ in 0..1100 {
+            player.collect_with_state(&mut buf, period, &state);
+        }
+        assert!((player.get_elapsed() - 10.0).abs() < 0.02);
+        assert_eq!(player.get_effective_pitch(), 0.0);
+    }
+
+    #[test]
+    fn free_run_replaces_the_track_and_restarts() {
+        let mut player = Player::new(44100);
+        player.set_free_run(true);
+        player.set_track(make_test_track());
+
+        let period = 441;
+        let mut buf = vec![0i16; period * 2];
+        let state = idle_timecode_state();
+        for _ in 0..300 {
+            player.collect_with_state(&mut buf, period, &state);
+        }
+        assert!(player.get_elapsed() > 2.9);
+
+        // A new track starts from zero immediately
+        player.set_track(make_test_track());
+        player.collect_with_state(&mut buf, period, &state);
+        assert!(player.get_elapsed() < 0.02);
+        assert!(player.get_effective_pitch() > 0.9);
+    }
+
+    #[test]
+    fn free_run_with_no_track_is_silent() {
+        let mut player = Player::new(44100);
+        player.set_free_run(true);
+        let mut buf = vec![1i16; 441 * 2];
+        player.collect_with_state(&mut buf, 441, &idle_timecode_state());
+        assert!(buf.iter().all(|&s| s == 0));
+        assert_eq!(player.get_effective_pitch(), 0.0);
     }
 
     #[test]

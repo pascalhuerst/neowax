@@ -69,6 +69,7 @@ neowax-ui
 | `--no-decor` | | Disable window decorations |
 | `--speed <multiplier>` | 1.0 | Vinyl speed multiplier |
 | `--phono` | | Enable phono-level input |
+| `--no-timecode` | | Play tracks directly instead of following the timecode: selecting a track starts it, selecting another replaces it |
 | `--swap-input` | | Swap left/right of the timecode input (if the record runs backwards) |
 | `--buffer <frames>` | 256 | ALSA playback buffer size (~5.3ms at 48kHz) |
 | `--capture-buffer <frames>` | 1024 | ALSA capture buffer size (~21ms at 48kHz) |
@@ -99,6 +100,7 @@ The file is plain TOML and can be edited by hand:
 ```toml
 accent = "Cyan"
 swap_input = false
+timecode_enabled = true
 input_device = "plughw:sndrpihifiberry"
 output_device = "plughw:sndrpihifiberry"
 library = "/media/pi/MUSIC"

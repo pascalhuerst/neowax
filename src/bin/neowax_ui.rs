@@ -91,6 +91,11 @@ struct Args {
     #[arg(long)]
     swap_input: bool,
 
+    /// Play tracks directly instead of following the timecode: selecting a
+    /// track starts it. Overrides the settings file.
+    #[arg(long)]
+    no_timecode: bool,
+
     /// Parse arguments and exit (used to validate a restart after an update)
     #[arg(long, hide = true)]
     check_args: bool,
@@ -320,8 +325,11 @@ impl NeowaxApp {
         app
     }
 
+    /// Is the vinyl driving playback right now? Without timecode a playing
+    /// track is never "active": selecting another one simply replaces it.
     fn is_deck_active(&self) -> bool {
-        self.deck_state.get_pitch().abs() > 0.01
+        self.deck_state.timecode_enabled.load(Ordering::Relaxed)
+            && self.deck_state.get_pitch().abs() > 0.01
     }
 
     fn rescan_library(&mut self) {
@@ -1187,6 +1195,10 @@ fn main() -> Result<(), eframe::Error> {
         startup.swap_input = true;
         locked.insert("swap_input");
     }
+    if args.no_timecode {
+        startup.timecode_enabled = false;
+        locked.insert("timecode_enabled");
+    }
     if TimecodeDef::find_definition(&startup.timecode).is_none() {
         tracing::warn!("Unknown timecode {:?}, using the default", startup.timecode);
         startup.timecode = Settings::default().timecode;
@@ -1220,6 +1232,9 @@ fn main() -> Result<(), eframe::Error> {
     deck_state
         .swap_input
         .store(startup.swap_input, Ordering::Relaxed);
+    deck_state
+        .timecode_enabled
+        .store(startup.timecode_enabled, Ordering::Relaxed);
 
     let (capture_handle, playback_handle, track_sender) = engine.run(
         running.clone(),

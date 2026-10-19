@@ -15,6 +15,8 @@ pub struct Settings {
     pub accent: String,
     /// Swap left/right of the timecode input
     pub swap_input: bool,
+    /// Follow the timecode. When off, selecting a track plays it straight away.
+    pub timecode_enabled: bool,
 
     // The settings below are only read at startup; changing them needs a restart.
     /// ALSA capture device (e.g. "plughw:sndrpihifiberry")
@@ -53,6 +55,7 @@ impl Default for Settings {
         Self {
             accent: "Amber".to_string(),
             swap_input: false,
+            timecode_enabled: true,
             input_device: "default".to_string(),
             output_device: "default".to_string(),
             library: None,

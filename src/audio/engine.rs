@@ -90,6 +90,8 @@ pub struct DeckState {
     pub running: AtomicBool,
     /// Swap left/right of the captured timecode signal (for crossed cabling)
     pub swap_input: AtomicBool,
+    /// Follow the timecode. When off, a loaded track plays by itself from the start.
+    pub timecode_enabled: AtomicBool,
     /// Spinner monitor data (written by audio thread via try_lock)
     pub monitor: Mutex<Vec<u8>>,
     /// Peak sample magnitude (L, R) of captured audio since last taken
@@ -115,6 +117,7 @@ impl DeckState {
             reset_timecoder: AtomicBool::new(false),
             running: AtomicBool::new(false),
             swap_input: AtomicBool::new(false),
+            timecode_enabled: AtomicBool::new(true),
             monitor: Mutex::new(Vec::new()),
             input_peak: [AtomicU32::new(0), AtomicU32::new(0)],
             output_peak: [AtomicU32::new(0), AtomicU32::new(0)],
@@ -435,6 +438,8 @@ fn run_playback_loop(
                 }
             }
         }
+
+        player.set_free_run(!state.timecode_enabled.load(Ordering::Relaxed));
 
         // Read latest timecoder state
         let tc_state = snapshot.read(tc_safe, tc_resolution);

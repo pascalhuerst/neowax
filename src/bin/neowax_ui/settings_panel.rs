@@ -30,6 +30,7 @@ pub enum SettingId {
     Update,
     Meters,
     SwapInput,
+    TimecodeEnabled,
     GroupAudio,
     GroupSystem,
     GroupDisplay,
@@ -66,6 +67,7 @@ const RESTART_SETTINGS: &[SettingId] = &[
 
 const AUDIO_ROWS: &[SettingId] = &[
     SettingId::Meters,
+    SettingId::TimecodeEnabled,
     SettingId::SwapInput,
     SettingId::InputDevice,
     SettingId::OutputDevice,
@@ -162,6 +164,7 @@ fn cycle<T: PartialEq + Copy>(list: &[T], current: &T, delta: isize) -> T {
 fn setting_key(id: SettingId) -> Option<&'static str> {
     Some(match id {
         SettingId::SwapInput => "swap_input",
+        SettingId::TimecodeEnabled => "timecode_enabled",
         SettingId::InputDevice => "input_device",
         SettingId::OutputDevice => "output_device",
         SettingId::Library => "library",
@@ -250,6 +253,7 @@ impl NeowaxApp {
             SettingId::Apply => "Apply changes & restart",
             SettingId::Update => "Install update",
             SettingId::SwapInput => "Swap input L/R",
+            SettingId::TimecodeEnabled => "Timecode control",
             SettingId::GroupAudio => "Audio",
             SettingId::GroupSystem => "System",
             SettingId::GroupDisplay => "Display",
@@ -276,6 +280,9 @@ impl NeowaxApp {
             SettingId::Accent => ACCENT_PRESETS[self.accent_index].0.to_string(),
             SettingId::SwapInput => {
                 on_off(self.deck_state.swap_input.load(Ordering::Relaxed)).to_string()
+            }
+            SettingId::TimecodeEnabled => {
+                on_off(self.deck_state.timecode_enabled.load(Ordering::Relaxed)).to_string()
             }
             SettingId::InputDevice => s.input_device.clone(),
             SettingId::OutputDevice => s.output_device.clone(),
@@ -382,6 +389,15 @@ impl NeowaxApp {
                 self.config.swap_input = swapped;
             }
             SettingId::Phono => self.config.phono = !self.config.phono,
+            SettingId::TimecodeEnabled => {
+                let enabled = !self.deck_state.timecode_enabled.load(Ordering::Relaxed);
+                self.deck_state
+                    .timecode_enabled
+                    .store(enabled, Ordering::Relaxed);
+                self.config.timecode_enabled = enabled;
+                // The two modes position the track differently: start clean
+                self.clear_deck();
+            }
             _ => return,
         }
         self.config_dirty = true;
@@ -425,7 +441,9 @@ impl NeowaxApp {
             if self.settings.open.contains(&group) {
                 for &id in children {
                     let kind = match id {
-                        SettingId::Phono | SettingId::SwapInput => RowKind::Toggle,
+                        SettingId::Phono | SettingId::SwapInput | SettingId::TimecodeEnabled => {
+                            RowKind::Toggle
+                        }
                         SettingId::PitchPlot | SettingId::Meters => RowKind::Display,
                         _ => RowKind::Choice,
                     };
@@ -445,7 +463,8 @@ impl NeowaxApp {
     fn reverse_warning_row(&self) -> Option<Row> {
         let id = SettingId::SwapInput;
         let swapped = self.deck_state.swap_input.load(Ordering::Relaxed);
-        if !self.reverse.detected() || swapped || self.is_locked(id) {
+        let timecode_on = self.deck_state.timecode_enabled.load(Ordering::Relaxed);
+        if !timecode_on || !self.reverse.detected() || swapped || self.is_locked(id) {
             return None;
         }
         let mut row = Row::new(
