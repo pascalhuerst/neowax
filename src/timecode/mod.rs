@@ -1,8 +1,10 @@
+mod direction;
 mod lookup_table;
 mod media_definition;
 pub mod pitch;
 mod timecoder;
 
+pub use direction::ReverseDetector;
 pub use lookup_table::Lut;
 pub use media_definition::TimecodeDef;
 pub use pitch::Pitch;

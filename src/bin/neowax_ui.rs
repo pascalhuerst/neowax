@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
 use neowax::audio::{DeckState, Engine, Track, TrackCommand};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
 use neowax::sysinfo;
-use neowax::timecode::TimecodeDef;
+use neowax::timecode::{ReverseDetector, TimecodeDef};
 use neowax::ui::{Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
 use neowax::update::{self, DebInfo};
 use std::cmp::Ordering as VersionOrdering;
@@ -80,6 +80,10 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     playback_cpu: usize,
 
+    /// Swap left/right of the timecode input (use if the record runs backwards)
+    #[arg(long)]
+    swap_input: bool,
+
     /// Parse arguments and exit (used to validate a restart after an update)
     #[arg(long, hide = true)]
     check_args: bool,
@@ -104,6 +108,8 @@ enum SettingsRow {
     Pitch,
     Accent,
     Update,
+    /// Only shown while reverse timecode is detected or the swap is active
+    SwapInput,
 }
 
 struct SettingsState {
@@ -181,6 +187,9 @@ struct NeowaxApp {
 
     // Pitch history for calibration plot (ring buffer)
     pitch_history: VecDeque<f32>,
+
+    // Detects crossed input channels (timecode running backwards)
+    reverse: ReverseDetector,
 
     // Peak meters, held and decayed per frame: [in L, in R, out L, out R]
     meters: [f32; 4],
@@ -276,6 +285,7 @@ impl NeowaxApp {
             pitch_history: VecDeque::with_capacity(600),
             timecode_resolution,
             meters: [0.0; 4],
+            reverse: ReverseDetector::new(),
             settings: SettingsState {
                 selected: 0,
                 pitch_open: false,
@@ -485,7 +495,9 @@ impl NeowaxApp {
         }
     }
 
-    fn update_from_engine(&mut self) {
+    fn update_from_engine(&mut self, dt: f32) {
+        self.reverse.update(self.deck_state.get_vinyl_pitch(), dt);
+
         let peaks = self.deck_state.take_peaks();
         for (meter, peak) in self.meters.iter_mut().zip(peaks) {
             *meter = peak.max(*meter * METER_DECAY);
@@ -685,6 +697,9 @@ impl NeowaxApp {
         if self.available_update.is_some() {
             rows.push(SettingsRow::Update);
         }
+        if self.reverse.detected() || self.deck_state.swap_input.load(Ordering::Relaxed) {
+            rows.push(SettingsRow::SwapInput);
+        }
         rows
     }
 
@@ -709,6 +724,11 @@ impl NeowaxApp {
             }
             SettingsRow::Pitch => self.settings.pitch_open = !self.settings.pitch_open,
             SettingsRow::Accent => self.settings.editing = !self.settings.editing,
+            SettingsRow::SwapInput => {
+                self.deck_state
+                    .swap_input
+                    .fetch_xor(true, Ordering::Relaxed);
+            }
             SettingsRow::Update => {
                 if self.is_deck_active() {
                     self.flash("Stop the deck first!");
@@ -790,6 +810,7 @@ impl NeowaxApp {
             .auto_shrink([false, false])
             .enable_scrolling(false)
             .show(ui, |ui| {
+                let mut meters_drawn = false;
                 for (idx, &row) in rows.iter().enumerate() {
                     let selected = idx == self.settings.selected;
                     let text = match row {
@@ -806,17 +827,35 @@ impl NeowaxApp {
                                 format!("Accent color: {name}")
                             }
                         }
+                        SettingsRow::SwapInput => {
+                            if self.deck_state.swap_input.load(Ordering::Relaxed) {
+                                "Input L/R swapped (select to undo)".to_string()
+                            } else {
+                                "! Timecode runs backwards: swap input L/R".to_string()
+                            }
+                        }
                         SettingsRow::Update => {
                             let version = self.available_update.as_ref().map_or("", |u| &u.version);
                             format!("Install update: {version}")
                         }
                     };
 
+                    // Meters sit right above the channel-swap warning
+                    if row == SettingsRow::SwapInput && !meters_drawn {
+                        self.draw_meters(ui);
+                        ui.add_space(SPACER);
+                        meters_drawn = true;
+                    }
+
+                    let warning = row == SettingsRow::SwapInput
+                        && !self.deck_state.swap_input.load(Ordering::Relaxed);
                     ui.horizontal(|ui| {
                         let response = ui.selectable_label(
                             selected,
                             RichText::new(text)
-                                .color(if selected {
+                                .color(if warning {
+                                    Color32::from_rgb(200, 80, 30)
+                                } else if selected {
                                     self.accent.bright()
                                 } else {
                                     self.accent.mid()
@@ -842,8 +881,10 @@ impl NeowaxApp {
                     }
                 }
 
-                ui.add_space(SPACER);
-                self.draw_meters(ui);
+                if !meters_drawn {
+                    ui.add_space(SPACER);
+                    self.draw_meters(ui);
+                }
                 ui.separator();
                 let info_color = Color32::from_rgb(180, 170, 150);
                 ui.label(
@@ -1206,8 +1247,14 @@ impl eframe::App for NeowaxApp {
 
         self.check_loaded_track();
         self.check_update_progress(ctx);
-        self.update_from_engine();
+        self.update_from_engine(ctx.input(|i| i.predicted_dt));
         self.handle_input(ctx);
+
+        // Rows can disappear (e.g. the swap row); keep the selection valid
+        if self.view == View::Settings {
+            let last = self.settings_rows().len() - 1;
+            self.settings.selected = self.settings.selected.min(last);
+        }
 
         // Decay status message
         if self.status_timer > 0.0 {
@@ -1328,6 +1375,9 @@ fn main() -> Result<(), eframe::Error> {
         engine.set_capture_buffer_size(buf);
     }
     let deck_state = engine.state.clone();
+    deck_state
+        .swap_input
+        .store(args.swap_input, Ordering::Relaxed);
 
     let (capture_handle, playback_handle, track_sender) = engine.run(
         running.clone(),

@@ -88,6 +88,8 @@ pub struct DeckState {
     pub reset_timecoder: AtomicBool,
     /// Whether the realtime loop is running
     pub running: AtomicBool,
+    /// Swap left/right of the captured timecode signal (for crossed cabling)
+    pub swap_input: AtomicBool,
     /// Spinner monitor data (written by audio thread via try_lock)
     pub monitor: Mutex<Vec<u8>>,
     /// Peak sample magnitude (L, R) of captured audio since last taken
@@ -112,6 +114,7 @@ impl DeckState {
             valid_counter: AtomicU32::new(0),
             reset_timecoder: AtomicBool::new(false),
             running: AtomicBool::new(false),
+            swap_input: AtomicBool::new(false),
             monitor: Mutex::new(Vec::new()),
             input_peak: [AtomicU32::new(0), AtomicU32::new(0)],
             output_peak: [AtomicU32::new(0), AtomicU32::new(0)],
@@ -329,6 +332,7 @@ fn run_capture_loop(
 
     let mut capture_buf = vec![0i16; period_size * 2];
     let mut period_counter: u32 = 0;
+    let mut swapped = state.swap_input.load(Ordering::Relaxed);
 
     tracing::info!("Capture loop started, period_size={}", period_size);
 
@@ -341,8 +345,20 @@ fn run_capture_loop(
         match input_pcm.io_i16()?.readi(&mut capture_buf) {
             Ok(frames) => {
                 let n = frames;
-                timecoder.submit(&capture_buf[..n * 2]);
+                // Meters show the physical inputs; the swap only affects decoding
                 publish_peaks(&state.input_peak, &capture_buf[..n * 2]);
+
+                let swap = state.swap_input.load(Ordering::Relaxed);
+                if swap != swapped {
+                    swapped = swap;
+                    timecoder.reset();
+                }
+                if swap {
+                    for frame in capture_buf[..n * 2].as_chunks_mut::<2>().0 {
+                        frame.swap(0, 1);
+                    }
+                }
+                timecoder.submit(&capture_buf[..n * 2]);
 
                 // Publish timecoder state to playback thread
                 snapshot.write(&timecoder);

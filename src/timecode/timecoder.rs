@@ -323,4 +323,34 @@ mod tests {
 
         Ok(())
     }
+
+    /// Crossed L/R cabling must show up as a clearly negative pitch, which
+    /// the settings panel uses to offer the channel swap.
+    #[test]
+    fn swapped_channels_run_backwards() -> Result<(), Box<dyn std::error::Error>> {
+        let buffer = std::fs::read("testdata/serato_cd_1min.raw")?;
+        let samples: Vec<i16> = buffer
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| i16::from_le_bytes(*chunk))
+            .collect();
+
+        let pitch_after = |swap: bool| {
+            let mut samples = samples.clone();
+            if swap {
+                for frame in samples.as_chunks_mut::<2>().0 {
+                    frame.swap(0, 1);
+                }
+            }
+            let mut tc = Timecoder::new(TimecodeDef::serato_cd(), 1.0, 44100, false);
+            // Skip the first seconds so the pitch filter has settled
+            tc.submit(&samples[..samples.len() / 2]);
+            tc.get_pitch()
+        };
+
+        assert!(pitch_after(false) > 0.5);
+        assert!(pitch_after(true) < -0.5);
+        Ok(())
+    }
 }

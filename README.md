@@ -63,6 +63,7 @@ neowax-ui --alsa <device> --library <path-to-music>
 | `--no-decor` | | Disable window decorations |
 | `--speed <multiplier>` | 1.0 | Vinyl speed multiplier |
 | `--phono` | | Enable phono-level input |
+| `--swap-input` | | Swap left/right of the timecode input (if the record runs backwards) |
 | `--buffer <frames>` | 256 | ALSA playback buffer size (~5.3ms at 48kHz) |
 | `--capture-buffer <frames>` | 1024 | ALSA capture buffer size (~21ms at 48kHz) |
 | `--capture-cpu <core>` | 3 | CPU core for the capture thread |
