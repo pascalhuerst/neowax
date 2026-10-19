@@ -31,10 +31,18 @@ path = "src/bin/neowax_ui.rs"
 maintainer = "Pascal Huerst"
 extended-description = "Plays digital audio files in sync with a vinyl timecode record (Serato 2A) through ALSA."
 license-file = ["LICENSE", "0"]
-depends = "libasound2, libc6"
+depends = "libasound2, libc6, cage, sudo, adduser, systemd"
+maintainer-scripts = "debian/"
+# Enabled and started on first install. Never stopped or restarted on upgrade:
+# the in-app updater runs dpkg from inside the service and restarts itself.
+systemd-units = { unit-scripts = "assets/systemd", enable = true, start = true, restart-after-upgrade = false, stop-on-upgrade = false }
 section = "sound"
 priority = "optional"
 assets = [
+    ["assets/neowax-install-update", "usr/lib/neowax/install-update", "755"],
+    ["assets/neowax.sudoers", "etc/sudoers.d/neowax", "440"],
+    ["assets/neowax.default", "etc/default/neowax", "644"],
+    ["assets/99-neowax-usb-automount.rules", "usr/lib/udev/rules.d/99-neowax-usb-automount.rules", "644"],
     ["target/release/neowax-ui", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/neowax/", "644"],
     ["assets/neowax.desktop", "usr/share/applications/", "644"],

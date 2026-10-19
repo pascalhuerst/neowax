@@ -129,6 +129,9 @@ pub fn library_candidates() -> Vec<PathBuf> {
         }
     };
     add_children("/mnt");
+    // Drives mounted by the packaged udev rule: /media/<kernel name>
+    add_children("/media");
+    found.push(PathBuf::from("/media"));
     // /media/<user>/<volume> and /run/media/<user>/<volume>
     for base in ["/media", "/run/media"] {
         if let Ok(users) = std::fs::read_dir(base) {

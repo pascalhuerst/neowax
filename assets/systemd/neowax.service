@@ -1,0 +1,43 @@
+[Unit]
+Description=neowax vinyl timecode DJ player (kiosk on tty1)
+Documentation=https://github.com/pascalhuerst/neowax
+After=systemd-user-sessions.service systemd-logind.service plymouth-quit-wait.service getty@tty1.service
+Wants=systemd-logind.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/dev/tty1
+
+[Service]
+Type=simple
+User=neowax
+Group=neowax
+SupplementaryGroups=audio video input render
+EnvironmentFile=-/etc/default/neowax
+Environment=XDG_SESSION_TYPE=wayland
+# cage is a single-application Wayland compositor: it shows neowax fullscreen
+# and exits when neowax exits, so systemd restarts the pair.
+ExecStart=/usr/bin/cage -- /usr/bin/neowax-ui $NEOWAX_ARGS
+Restart=always
+RestartSec=2
+
+# Own tty1 and get a logind session (seat access for display and input)
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+
+# Realtime audio threads
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+AmbientCapabilities=CAP_SYS_NICE
+
+# Note: no NoNewPrivileges / CapabilityBoundingSet here. The in-app updater
+# runs `sudo` to install a new package, which needs to gain privileges.
+
+[Install]
+WantedBy=multi-user.target

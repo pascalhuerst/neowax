@@ -1,0 +1,8 @@
+# Extra command-line arguments for neowax-ui, used by neowax.service.
+#
+# Normally leave this empty: settings are managed in the on-device Settings
+# panel and saved to /var/lib/neowax/.config/neowax/settings.toml.
+# A flag given here overrides the panel, and that setting is then shown
+# greyed out there. Example:
+#NEOWAX_ARGS="--alsa plughw:sndrpihifiberry"
+NEOWAX_ARGS=

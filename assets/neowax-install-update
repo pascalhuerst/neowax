@@ -1,0 +1,19 @@
+#!/bin/sh
+# Install a neowax update package on behalf of the kiosk user (via sudo).
+# Usage: install-update <file.deb>
+set -eu
+
+deb="${1:?usage: install-update <file.deb>}"
+
+# Work on a root-owned copy so the file can't change between check and install
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+cp -- "$deb" "$tmp/update.deb"
+
+package="$(dpkg-deb --field "$tmp/update.deb" Package)"
+if [ "$package" != "neowax" ]; then
+    echo "not a neowax package ($package)" >&2
+    exit 1
+fi
+
+dpkg -i "$tmp/update.deb"

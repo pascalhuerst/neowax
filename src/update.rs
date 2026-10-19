@@ -1,12 +1,15 @@
 //! Self-update from a `.deb` file found while scanning the library.
 //!
 //! The package is inspected with `dpkg-deb`, compared against the installed
-//! version with `dpkg`, and installed with `sudo -n dpkg -i`.
+//! version with `dpkg`, and installed with `sudo -n` (the packaged helper, or `dpkg -i`).
 
 use anyhow::{anyhow, bail, Context, Result};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Root helper shipped by the package, allowed for the kiosk user via sudoers.
+const INSTALL_HELPER: &str = "/usr/lib/neowax/install-update";
 
 /// Name of the Debian package this binary ships in.
 pub const PACKAGE_NAME: &str = "neowax";
@@ -122,11 +125,16 @@ pub fn compare_versions(candidate: &str, installed: &str) -> Result<Ordering> {
 
 /// Install the package. Needs passwordless sudo (or running as root).
 pub fn install(deb: &Path) -> Result<()> {
-    let out = Command::new("sudo")
-        .args(["-n", "dpkg", "-i"])
-        .arg(deb)
-        .output()
-        .context("cannot run sudo")?;
+    // The packaged helper checks the file and runs dpkg; it is the only thing
+    // the kiosk user may run as root. Without it (manual setups), use dpkg.
+    let mut cmd = Command::new("sudo");
+    cmd.arg("-n");
+    if Path::new(INSTALL_HELPER).exists() {
+        cmd.arg(INSTALL_HELPER);
+    } else {
+        cmd.args(["dpkg", "-i"]);
+    }
+    let out = cmd.arg(deb).output().context("cannot run sudo")?;
     if out.status.success() {
         return Ok(());
     }

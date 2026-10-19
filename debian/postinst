@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    # Dedicated user for the kiosk service
+    if ! getent passwd neowax >/dev/null; then
+        adduser --system --group --home /var/lib/neowax \
+            --shell /usr/sbin/nologin --gecos "neowax kiosk" neowax
+    fi
+    for group in audio video input render; do
+        if getent group "$group" >/dev/null; then
+            adduser neowax "$group" >/dev/null 2>&1 || true
+        fi
+    done
+
+    # Default settings on first install: look for music on the USB drives
+    config=/var/lib/neowax/.config/neowax
+    install -d -o neowax -g neowax -m 0755 /var/lib/neowax /var/lib/neowax/.config "$config"
+    if [ ! -e "$config/settings.toml" ]; then
+        printf 'library = "/media"\n' > "$config/settings.toml"
+        chown neowax:neowax "$config/settings.toml"
+    fi
+
+    udevadm control --reload 2>/dev/null || true
+fi
+
+#DEBHELPER#

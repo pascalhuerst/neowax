@@ -1,0 +1,3 @@
+# Lets the neowax kiosk user install an update package picked in the Settings
+# panel. Only the helper may run as root; it checks the package first.
+neowax ALL=(root) NOPASSWD: /usr/lib/neowax/install-update

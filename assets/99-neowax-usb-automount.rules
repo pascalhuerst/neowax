@@ -1,0 +1,7 @@
+# Mount USB drives under /media/<kernel name> when inserted, so the music
+# library (/media) sees them without a desktop session.
+ACTION=="add", SUBSYSTEMS=="usb", SUBSYSTEM=="block", ENV{ID_FS_USAGE}=="filesystem", RUN{program}+="/usr/bin/systemd-mount --no-block --automount=yes --collect --options=nosuid,nodev,noexec,noatime $devnode /media/%k"
+
+# Clean up on removal. rmdir (not rm -rf) so a drive that failed to unmount
+# can never have its contents deleted.
+ACTION=="remove", SUBSYSTEMS=="usb", SUBSYSTEM=="block", RUN{program}+="/bin/sh -c '/usr/bin/umount -lf /media/%k 2>/dev/null; rmdir /media/%k 2>/dev/null; true'"

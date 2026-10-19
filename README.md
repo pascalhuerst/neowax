@@ -75,6 +75,21 @@ neowax-ui
 | `--capture-cpu <core>` | 3 | CPU core for the capture thread |
 | `--playback-cpu <core>` | 2 | CPU core for the playback thread |
 
+## Running as an appliance (Raspberry Pi)
+
+The `.deb` sets the Pi up as a kiosk: installing it enables `neowax.service`, which takes over tty1 and runs neowax fullscreen in [cage](https://github.com/cage-kiosk/cage) as a dedicated `neowax` user. No login, shell profile or autologin needed.
+
+```sh
+sudo dpkg -i neowax_<version>_arm64.deb   # installs cage etc. via apt if needed: sudo apt install ./neowax_*.deb
+```
+
+What the package provides:
+
+- **`neowax.service`**: starts on boot, restarts on crash. Logs: `journalctl -u neowax`. Stop it with `sudo systemctl stop neowax` (tty1 then returns to a login prompt once you also run `sudo systemctl start getty@tty1`).
+- **USB automount**: a udev rule mounts USB drives with a filesystem under `/media/<device>` (read as the music library by default). Drives are mounted `nosuid,nodev,noexec`.
+- **Settings**: stored in `/var/lib/neowax/.config/neowax/settings.toml`; choose the sound card and library in the on-device Settings panel. Extra command-line flags can go in `/etc/default/neowax` (`NEOWAX_ARGS`), but anything set there is locked in the panel.
+- **Updates**: put a newer `neowax_*.deb` on a USB drive. The Settings panel shows "Install update"; it installs through a small root helper (`/usr/lib/neowax/install-update`, allowed via `/etc/sudoers.d/neowax`) that only accepts `neowax` packages. Anyone who can plug a drive into the device can therefore run code as root, so treat the box as physically trusted.
+
 ## Settings
 
 Everything below can be changed in the on-device Settings panel (one encoder: scroll to move, click to select, click again to confirm a value; the touch screen works too). Changes are saved right away to `~/.config/neowax/settings.toml` (or `$XDG_CONFIG_HOME/neowax/settings.toml`). Settings marked `*` take effect after "Apply changes & restart".
