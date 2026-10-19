@@ -18,7 +18,7 @@
 use super::*;
 use neowax::audio::list_alsa_devices;
 use neowax::settings::{
-    library_candidates, CAPTURE_BUFFERS, PLAYBACK_BUFFERS, SAMPLE_RATES, SPEEDS,
+    library_candidates, BRIGHTNESS_LEVELS, CAPTURE_BUFFERS, PLAYBACK_BUFFERS, SAMPLE_RATES, SPEEDS,
 };
 use neowax::timecode::TimecodeDef;
 use std::collections::HashSet;
@@ -45,6 +45,7 @@ pub enum SettingId {
     GroupDisplay,
     GroupPitch,
     PitchPlot,
+    Brightness,
     InputDevice,
     OutputDevice,
     Library,
@@ -282,6 +283,7 @@ impl NeowaxApp {
             SettingId::CaptureCpu => "Capture CPU",
             SettingId::PlaybackCpu => "Playback CPU",
             SettingId::Accent => "Accent color",
+            SettingId::Brightness => "Brightness",
             SettingId::Meters | SettingId::PitchPlot => "",
         }
     }
@@ -290,6 +292,7 @@ impl NeowaxApp {
         let s = self.shown(id);
         match id {
             SettingId::Accent => ACCENT_PRESETS[self.accent_index].0.to_string(),
+            SettingId::Brightness => format!("{}%", s.brightness),
             SettingId::SwapInput => {
                 on_off(self.deck_state.swap_input.load(Ordering::Relaxed)).to_string()
             }
@@ -372,6 +375,15 @@ impl NeowaxApp {
                     .as_ref()
                     .map_or(String::new(), |p| p.display().to_string());
                 c.library = Some(PathBuf::from(cycle_string(candidates, &current, delta)));
+            }
+            SettingId::Brightness => {
+                // No wrap-around: turning up at 100% must not jump to the darkest step
+                let at = BRIGHTNESS_LEVELS
+                    .iter()
+                    .position(|&b| b >= c.brightness)
+                    .unwrap_or(BRIGHTNESS_LEVELS.len() - 1) as isize;
+                let next = (at + delta).clamp(0, BRIGHTNESS_LEVELS.len() as isize - 1);
+                c.brightness = BRIGHTNESS_LEVELS[next as usize];
             }
             SettingId::Timecode => {
                 let next = cycle(TimecodeDef::NAMES, &c.timecode.as_str(), delta);
@@ -491,7 +503,10 @@ impl NeowaxApp {
                     SettingId::OnlineCheck,
                 ],
             ),
-            (SettingId::GroupDisplay, &[SettingId::Accent]),
+            (
+                SettingId::GroupDisplay,
+                &[SettingId::Accent, SettingId::Brightness],
+            ),
             (SettingId::GroupPitch, &[SettingId::PitchPlot]),
         ];
         for (group, children) in groups {

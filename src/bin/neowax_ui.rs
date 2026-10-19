@@ -9,7 +9,7 @@ use neowax::online::{self, OnlineRelease};
 use neowax::settings::Settings;
 use neowax::sysinfo;
 use neowax::timecode::{ReverseDetector, TimecodeDef};
-use neowax::ui::{Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
+use neowax::ui::{dim_alpha, Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
 use neowax::update::{self, DebInfo, UpdateCandidate};
 use settings_panel::SettingsState;
 use std::cmp::Ordering as VersionOrdering;
@@ -1270,6 +1270,16 @@ impl eframe::App for NeowaxApp {
                     }
                 }
             });
+
+        // Dim the whole screen: a translucent black layer over everything
+        let alpha = dim_alpha(self.config.brightness);
+        if alpha > 0 {
+            ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("dimming"),
+            ))
+            .rect_filled(ctx.screen_rect(), 0.0, Color32::from_black_alpha(alpha));
+        }
 
         ctx.request_repaint();
     }

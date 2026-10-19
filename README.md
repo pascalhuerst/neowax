@@ -109,6 +109,7 @@ The file is plain TOML and can be edited by hand:
 
 ```toml
 accent = "Cyan"
+brightness = 100   # percent, 10-100
 swap_input = false
 timecode_enabled = true
 input_device = "plughw:sndrpihifiberry"

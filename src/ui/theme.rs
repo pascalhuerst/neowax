@@ -12,6 +12,14 @@ pub const ACCENT_PRESETS: &[(&str, Color32)] = &[
     ("White", Color32::from_rgb(225, 225, 225)),
 ];
 
+/// Opacity (0-255) of the black layer that dims the whole screen to
+/// `brightness` percent. 100% (or more) gives 0 = no dimming; the layer never
+/// gets fully opaque, so the screen stays readable.
+pub fn dim_alpha(brightness: u8) -> u8 {
+    let brightness = brightness.clamp(10, 100) as u32;
+    ((100 - brightness) * 255 / 100) as u8
+}
+
 /// The single user-selected color all highlights are derived from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Accent(Color32);
@@ -85,4 +93,24 @@ fn scale(c: Color32, f: f32) -> Color32 {
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t) as u8;
     Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dim_alpha;
+
+    #[test]
+    fn full_brightness_does_not_dim() {
+        assert_eq!(dim_alpha(100), 0);
+        assert_eq!(dim_alpha(200), 0);
+    }
+
+    #[test]
+    fn dimming_grows_as_brightness_drops_but_never_blacks_out() {
+        assert!(dim_alpha(50) > dim_alpha(75));
+        assert!(dim_alpha(10) > dim_alpha(50));
+        assert!(dim_alpha(10) < 255);
+        // Out-of-range values from a hand-edited file are held at the minimum
+        assert_eq!(dim_alpha(0), dim_alpha(10));
+    }
 }

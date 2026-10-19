@@ -15,6 +15,8 @@ pub struct Settings {
     pub accent: String,
     /// Swap left/right of the timecode input
     pub swap_input: bool,
+    /// Screen brightness in percent (see `BRIGHTNESS_LEVELS`)
+    pub brightness: u8,
     /// Follow the timecode. When off, selecting a track plays it straight away.
     pub timecode_enabled: bool,
 
@@ -45,6 +47,12 @@ pub struct Settings {
     pub playback_cpu: usize,
 }
 
+/// Brightness steps offered in the settings panel. The lowest is well above
+/// zero so the screen can't be dimmed to black and lock the user out.
+pub const BRIGHTNESS_LEVELS: &[u8] = &[
+    10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
+];
+
 /// Values offered in the settings panel.
 pub const SAMPLE_RATES: &[u32] = &[44100, 48000, 96000];
 pub const PLAYBACK_BUFFERS: &[u32] = &[64, 128, 256, 512, 1024, 2048];
@@ -57,6 +65,7 @@ impl Default for Settings {
         Self {
             accent: "Amber".to_string(),
             swap_input: false,
+            brightness: 100,
             timecode_enabled: true,
             input_device: "default".to_string(),
             output_device: "default".to_string(),
