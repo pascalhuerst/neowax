@@ -25,6 +25,26 @@ const METER_DECAY: f32 = 0.96;
 const METER_LABEL_WIDTH: f32 = 32.0;
 /// Bottom of the meter scale in dB
 const METER_FLOOR_DB: f32 = -48.0;
+/// Meter color above -3 dB
+const CLIP_COLOR: Color32 = Color32::from_rgb(200, 80, 30);
+/// Thickness of one bar of the slim output meter on the deck view
+const DECK_METER_BAR: f32 = 4.0;
+
+/// Draw one peak bar: `peak` (linear, 0.0..=1.0) on a dB scale from
+/// `METER_FLOOR_DB` up to full scale, in `clip_color` above -3 dB.
+fn draw_peak_bar(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    peak: f32,
+    color: Color32,
+    clip_color: Color32,
+) {
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(20, 20, 20));
+    let db = 20.0 * peak.max(1e-6).log10();
+    let frac = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
+    let fill = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * frac, rect.height()));
+    painter.rect_filled(fill, 0.0, if db > -3.0 { clip_color } else { color });
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "neowax - vinyl timecode DJ player")]
@@ -592,7 +612,8 @@ impl NeowaxApp {
         let elapsed = self.deck_state.get_elapsed();
         let remaining = self.track_duration - elapsed;
 
-        // Row 1: Spinner + signal bar + track name
+        // Row 1: Spinner + signal bar + track name (tap the name to open the library)
+        let mut open_library = false;
         ui.horizontal(|ui| {
             self.spinner.ui(ui);
 
@@ -635,18 +656,18 @@ impl NeowaxApp {
             );
             let text_width = galley.size().x;
 
-            if text_width <= available {
-                // Fits — just show it, reset scroll
+            // Marquee: scroll back and forth when the title doesn't fit
+            let scroll = if text_width <= available {
                 self.title_scroll_offset = 0.0;
-                ui.label(RichText::new(text).color(Color32::WHITE).size(36.0));
+                0.0
             } else {
-                // Marquee: scroll back and forth
                 let overflow = text_width - available;
                 // Scroll speed: 30 pixels/sec, ping-pong
                 let cycle = (overflow / 30.0) * 2.0 + 2.0; // seconds for full cycle + pauses
                 let t = self.title_scroll_offset % cycle;
                 let pause = 1.0; // 1 second pause at each end
-                let scroll = if t < pause {
+                self.title_scroll_offset += ui.input(|i| i.predicted_dt);
+                if t < pause {
                     0.0
                 } else if t < pause + overflow / 30.0 {
                     (t - pause) * 30.0
@@ -655,18 +676,23 @@ impl NeowaxApp {
                 } else {
                     overflow - (t - pause * 2.0 - overflow / 30.0) * 30.0
                 }
-                .clamp(0.0, overflow);
+                .clamp(0.0, overflow)
+            };
 
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(available, galley.size().y),
-                    egui::Sense::hover(),
-                );
-                ui.painter()
-                    .with_clip_rect(rect)
-                    .galley(egui::pos2(rect.left() - scroll, rect.top()), galley);
-                self.title_scroll_offset += ui.input(|i| i.predicted_dt);
+            // The whole title area is a touch target that opens the library
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(available, bar_height), egui::Sense::click());
+            let top = rect.center().y - galley.size().y / 2.0;
+            ui.painter()
+                .with_clip_rect(rect)
+                .galley(egui::pos2(rect.left() - scroll, top), galley);
+            if response.clicked() {
+                open_library = true;
             }
         });
+        if open_library {
+            self.view = View::Library;
+        }
 
         ui.add_space(SPACER);
 
@@ -691,27 +717,32 @@ impl NeowaxApp {
 
         ui.add_space(SPACER);
 
-        // Waveform
-        self.waveform.show(ui);
+        // The waveform takes all the remaining height, minus the slim meter below it
+        let meter_height = DECK_METER_BAR * 2.0 + 2.0;
+        let waveform_height = (ui.available_height() - meter_height - SPACER).max(48.0);
+        self.waveform.show(ui, waveform_height);
 
         ui.add_space(SPACER);
 
-        // Bottom bar: settings button pinned to bottom
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-            let btn = ui.add_sized(
-                [ui.available_width(), 32.0],
-                egui::Button::new(
-                    RichText::new("Settings")
-                        .color(self.accent.mid())
-                        .size(14.0),
-                )
-                .fill(self.accent.tint())
-                .rounding(4.0),
+        // Output peak meter along the very bottom, kept dim so it doesn't distract
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), meter_height),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter();
+        for (i, &peak) in self.meters[2..4].iter().enumerate() {
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(rect.left(), rect.top() + i as f32 * (DECK_METER_BAR + 2.0)),
+                egui::vec2(rect.width(), DECK_METER_BAR),
             );
-            if btn.clicked() {
-                self.open_settings();
-            }
-        });
+            draw_peak_bar(
+                painter,
+                bar,
+                peak,
+                self.accent.dark(),
+                CLIP_COLOR.linear_multiply(0.7),
+            );
+        }
     }
 
     fn draw_pitch_plot(&self, ui: &mut egui::Ui, height: f32) {

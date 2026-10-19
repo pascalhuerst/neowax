@@ -49,6 +49,11 @@ impl Accent {
         scale(self.0, 0.72)
     }
 
+    /// Subdued shade, for elements that should stay out of the way.
+    pub fn dark(&self) -> Color32 {
+        scale(self.0, 0.45)
+    }
+
     /// Very dark shade, for button and inactive backgrounds.
     pub fn tint(&self) -> Color32 {
         scale(self.0, 0.14)

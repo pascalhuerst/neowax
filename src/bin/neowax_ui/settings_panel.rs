@@ -667,20 +667,7 @@ impl NeowaxApp {
                         egui::pos2(rect.left(), top),
                         egui::vec2(rect.width(), bar_height),
                     );
-                    painter.rect_filled(track, 0.0, Color32::from_rgb(20, 20, 20));
-
-                    let db = 20.0 * peak.max(1e-6).log10();
-                    let frac = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
-                    let color = if db > -3.0 {
-                        Color32::from_rgb(200, 80, 30)
-                    } else {
-                        self.accent.base()
-                    };
-                    let fill = egui::Rect::from_min_size(
-                        track.min,
-                        egui::vec2(track.width() * frac, bar_height),
-                    );
-                    painter.rect_filled(fill, 0.0, color);
+                    draw_peak_bar(painter, track, peak, self.accent.base(), CLIP_COLOR);
                 }
                 ui.add_space(SPACER);
             }

@@ -2,7 +2,6 @@ use super::Accent;
 use egui::{epaint::Mesh, Color32, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
 use std::time::Duration;
 
-const OVERVIEW_HEIGHT: f32 = 112.0;
 const CURSOR_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
 const BACKGROUND_COLOR: Color32 = Color32::from_rgb(12, 12, 18);
 const GRIDLINE_COLOR: Color32 = Color32::from_rgb(30, 30, 40);
@@ -192,14 +191,15 @@ impl WaveformWidget {
         self.current_position = position;
     }
 
-    pub fn show(&mut self, ui: &mut Ui) -> Response {
+    /// Draw the waveform overview, `height` pixels tall and as wide as the available space.
+    pub fn show(&mut self, ui: &mut Ui, height: f32) -> Response {
         let available_width = ui.available_width();
         let current_pos = self.current_position.as_secs_f64();
         let duration_secs = self.duration.as_secs_f64();
 
         // Overview waveform
         let (overview_rect, overview_response) =
-            ui.allocate_exact_size(Vec2::new(available_width, OVERVIEW_HEIGHT), Sense::hover());
+            ui.allocate_exact_size(Vec2::new(available_width, height), Sense::hover());
         self.draw_waveform(ui, &overview_rect, None, true);
 
         // Position cursor on overview
