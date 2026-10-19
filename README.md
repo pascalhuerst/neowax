@@ -43,6 +43,15 @@ MP3, FLAC, WAV, OGG/Vorbis, AAC/M4A, AIFF, PCM
 cargo build --release
 ```
 
+## Releasing
+
+```sh
+scripts/release.sh 0.2.0          # bump Cargo.toml/Cargo.lock, commit "Release v0.2.0", tag v0.2.0
+git push origin main && git push origin v0.2.0   # the tag starts the GitHub release build
+```
+
+`scripts/release.sh --push <version>` also pushes, `--dry-run` only checks. It refuses to run with uncommitted changes, off `main`, behind `origin/main`, with a version that isn't higher than the current one, or if the tag already exists.
+
 ## Usage
 
 ```sh
