@@ -2,6 +2,7 @@ use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
 use neowax::audio::{DeckState, Engine, Track, TrackCommand};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
+use neowax::settings::Settings;
 use neowax::sysinfo;
 use neowax::timecode::{ReverseDetector, TimecodeDef};
 use neowax::ui::{Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
@@ -198,6 +199,13 @@ struct NeowaxApp {
     settings: SettingsState,
     accent_index: usize,
     accent: Accent,
+
+    // Persistent user settings (the file's values, never CLI overrides)
+    config: Settings,
+    config_path: Option<PathBuf>,
+    config_dirty: bool,
+    /// swap_input is forced by --swap-input and cannot be changed in the panel
+    swap_input_locked: bool,
     os_version: String,
     /// Best neowax .deb found while scanning the library
     available_update: Option<DebInfo>,
@@ -212,6 +220,7 @@ struct NeowaxApp {
 }
 
 impl NeowaxApp {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         deck_state: Arc<DeckState>,
         track_sender: mpsc::Sender<TrackCommand>,
@@ -220,6 +229,9 @@ impl NeowaxApp {
         sample_rate: u32,
         timecode_resolution: f64,
         restart_requested: Arc<AtomicBool>,
+        config: Settings,
+        config_path: Option<PathBuf>,
+        swap_input_locked: bool,
     ) -> Self {
         let library_tree = scan.tree;
         let library_flat = library::flatten_tree(&library_tree);
@@ -262,7 +274,7 @@ impl NeowaxApp {
             }
         });
 
-        Self {
+        let mut app = Self {
             view: View::Library,
             deck_state,
             track_sender,
@@ -294,13 +306,30 @@ impl NeowaxApp {
             },
             accent_index: 0,
             accent: Accent::default(),
+            config,
+            config_path,
+            config_dirty: false,
+            swap_input_locked,
             os_version: sysinfo::os_version(),
             available_update: update::find_best(&scan.packages),
             status_message: String::new(),
             status_timer: 0.0,
             update: None,
             restart_requested,
-        }
+        };
+
+        let accent = ACCENT_PRESETS
+            .iter()
+            .position(|(name, _)| name.eq_ignore_ascii_case(&app.config.accent))
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "Unknown accent color {:?}, using default",
+                    app.config.accent
+                );
+                0
+            });
+        app.apply_accent(accent);
+        app
     }
 
     fn is_deck_active(&self) -> bool {
@@ -697,17 +726,39 @@ impl NeowaxApp {
         if self.available_update.is_some() {
             rows.push(SettingsRow::Update);
         }
-        if self.reverse.detected() || self.deck_state.swap_input.load(Ordering::Relaxed) {
-            rows.push(SettingsRow::SwapInput);
-        }
+        rows.push(SettingsRow::SwapInput);
         rows
     }
 
-    fn set_accent(&mut self, index: usize) {
+    /// Show an accent color without touching the saved settings.
+    fn apply_accent(&mut self, index: usize) {
         self.accent_index = index % ACCENT_PRESETS.len();
         self.accent = Accent::from_preset(self.accent_index);
         self.spinner.set_accent(self.accent);
         self.waveform.set_accent(self.accent);
+    }
+
+    /// The user picked an accent color: show it and queue it for saving.
+    fn set_accent(&mut self, index: usize) {
+        self.apply_accent(index);
+        self.config.accent = ACCENT_PRESETS[self.accent_index].0.to_string();
+        self.config_dirty = true;
+    }
+
+    /// Write queued setting changes. Held back while a value is being edited
+    /// so scrolling through colors doesn't write to the SD card on every tick.
+    fn save_config_if_dirty(&mut self) {
+        if !self.config_dirty || self.settings.editing {
+            return;
+        }
+        self.config_dirty = false;
+        let Some(path) = &self.config_path else {
+            return;
+        };
+        if let Err(e) = self.config.save(path) {
+            tracing::error!("Failed to save settings: {:#}", e);
+            self.flash("Could not save settings");
+        }
     }
 
     fn step_accent(&mut self, delta: isize) {
@@ -725,9 +776,14 @@ impl NeowaxApp {
             SettingsRow::Pitch => self.settings.pitch_open = !self.settings.pitch_open,
             SettingsRow::Accent => self.settings.editing = !self.settings.editing,
             SettingsRow::SwapInput => {
-                self.deck_state
-                    .swap_input
-                    .fetch_xor(true, Ordering::Relaxed);
+                if self.swap_input_locked {
+                    self.flash("Set on the command line (--swap-input)");
+                } else {
+                    let swapped = !self.deck_state.swap_input.load(Ordering::Relaxed);
+                    self.deck_state.swap_input.store(swapped, Ordering::Relaxed);
+                    self.config.swap_input = swapped;
+                    self.config_dirty = true;
+                }
             }
             SettingsRow::Update => {
                 if self.is_deck_active() {
@@ -828,10 +884,14 @@ impl NeowaxApp {
                             }
                         }
                         SettingsRow::SwapInput => {
-                            if self.deck_state.swap_input.load(Ordering::Relaxed) {
-                                "Input L/R swapped (select to undo)".to_string()
-                            } else {
+                            let swapped = self.deck_state.swap_input.load(Ordering::Relaxed);
+                            let state = if swapped { "on" } else { "off" };
+                            if self.swap_input_locked {
+                                format!("Swap input L/R: {state} (command line)")
+                            } else if self.reverse.detected() && !swapped {
                                 "! Timecode runs backwards: swap input L/R".to_string()
+                            } else {
+                                format!("Swap input L/R: {state}")
                             }
                         }
                         SettingsRow::Update => {
@@ -847,13 +907,17 @@ impl NeowaxApp {
                         meters_drawn = true;
                     }
 
+                    let locked = row == SettingsRow::SwapInput && self.swap_input_locked;
                     let warning = row == SettingsRow::SwapInput
+                        && self.reverse.detected()
                         && !self.deck_state.swap_input.load(Ordering::Relaxed);
                     ui.horizontal(|ui| {
                         let response = ui.selectable_label(
                             selected,
                             RichText::new(text)
-                                .color(if warning {
+                                .color(if locked {
+                                    Color32::from_rgb(110, 110, 110)
+                                } else if warning {
                                     Color32::from_rgb(200, 80, 30)
                                 } else if selected {
                                     self.accent.bright()
@@ -1250,11 +1314,7 @@ impl eframe::App for NeowaxApp {
         self.update_from_engine(ctx.input(|i| i.predicted_dt));
         self.handle_input(ctx);
 
-        // Rows can disappear (e.g. the swap row); keep the selection valid
-        if self.view == View::Settings {
-            let last = self.settings_rows().len() - 1;
-            self.settings.selected = self.settings.selected.min(last);
-        }
+        self.save_config_if_dirty();
 
         // Decay status message
         if self.status_timer > 0.0 {
@@ -1375,9 +1435,17 @@ fn main() -> Result<(), eframe::Error> {
         engine.set_capture_buffer_size(buf);
     }
     let deck_state = engine.state.clone();
+
+    // CLI flags override the settings file; overridden settings are locked in the panel
+    let config_path = Settings::default_path();
+    let config = config_path
+        .as_deref()
+        .map(Settings::load)
+        .unwrap_or_default();
+    let swap_input_locked = args.swap_input;
     deck_state
         .swap_input
-        .store(args.swap_input, Ordering::Relaxed);
+        .store(args.swap_input || config.swap_input, Ordering::Relaxed);
 
     let (capture_handle, playback_handle, track_sender) = engine.run(
         running.clone(),
@@ -1401,6 +1469,9 @@ fn main() -> Result<(), eframe::Error> {
         args.sample_rate,
         timecode_resolution,
         restart_requested.clone(),
+        config,
+        config_path,
+        swap_input_locked,
     );
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/neowax-256.png"))

@@ -69,6 +69,17 @@ neowax-ui --alsa <device> --library <path-to-music>
 | `--capture-cpu <core>` | 3 | CPU core for the capture thread |
 | `--playback-cpu <core>` | 2 | CPU core for the playback thread |
 
+## Settings
+
+Settings changed in the on-device Settings panel (accent color, input channel swap) are saved to `~/.config/neowax/settings.toml` (or `$XDG_CONFIG_HOME/neowax/settings.toml`) right away. The file is plain TOML and can be edited by hand:
+
+```toml
+accent = "Cyan"
+swap_input = false
+```
+
+A command-line flag always wins over the file. A setting forced by a flag is shown greyed out in the panel, marked "(command line)", and can't be changed there; remove the flag from your launch command to manage it from the panel.
+
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE). You are free to use, modify, and distribute this software, provided that any derivative work is also released under the same license.
