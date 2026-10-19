@@ -9,7 +9,7 @@ use neowax::settings::Settings;
 use neowax::sysinfo;
 use neowax::timecode::{ReverseDetector, TimecodeDef};
 use neowax::ui::{Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
-use neowax::update::{self, DebInfo};
+use neowax::update::{self, DebInfo, UpdateCandidate};
 use settings_panel::SettingsState;
 use std::cmp::Ordering as VersionOrdering;
 use std::collections::{HashSet, VecDeque};
@@ -203,7 +203,9 @@ struct NeowaxApp {
     close_requested: bool,
     os_version: String,
     /// Best neowax .deb found while scanning the library
-    available_update: Option<DebInfo>,
+    available_updates: Vec<UpdateCandidate>,
+    /// Version of the installed package, to compare update candidates with
+    installed_version: String,
 
     // Status flash message
     status_message: String,
@@ -231,6 +233,7 @@ impl NeowaxApp {
     ) -> Self {
         let library_tree = scan.tree;
         let library_flat = library::flatten_tree(&library_tree);
+        let installed_version = update::installed_version();
         let (load_request_tx, load_request_rx) = mpsc::channel::<(PathBuf, String)>();
         let (loaded_tx, loaded_rx) = mpsc::channel::<LoadedTrack>();
         let load_progress = Arc::new(AtomicU32::new(0));
@@ -304,7 +307,8 @@ impl NeowaxApp {
             locked,
             close_requested: false,
             os_version: sysinfo::os_version(),
-            available_update: update::find_best(&scan.packages),
+            installed_version: installed_version.clone(),
+            available_updates: update::find_updates(&scan.packages, &installed_version),
             status_message: String::new(),
             status_timer: 0.0,
             update: None,
@@ -340,7 +344,7 @@ impl NeowaxApp {
         let _ = std::fs::read_dir(dir);
         let scan = library::scan_directory(dir);
         self.library_tree = scan.tree;
-        self.available_update = update::find_best(&scan.packages);
+        self.available_updates = update::find_updates(&scan.packages, &self.installed_version);
         self.library_flat = library::flatten_tree(&self.library_tree);
         self.selected_index = 0;
         tracing::info!("Rescanned library: {} entries", self.library_flat.len());
@@ -377,16 +381,13 @@ impl NeowaxApp {
     }
 
     /// Open the update view for a neowax package found in the library.
-    fn begin_update(&mut self, info: DebInfo) {
-        let installed = update::installed_version();
-        let ordering =
-            update::compare_versions(&info.version, &installed).unwrap_or(VersionOrdering::Equal);
+    fn begin_update(&mut self, candidate: UpdateCandidate) {
         self.update = Some(UpdateState {
-            info,
-            installed,
-            ordering,
+            info: candidate.info,
+            installed: self.installed_version.clone(),
+            ordering: candidate.ordering,
             // Default to Cancel when the package is not newer
-            selected: if ordering == VersionOrdering::Greater {
+            selected: if candidate.ordering == VersionOrdering::Greater {
                 0
             } else {
                 1

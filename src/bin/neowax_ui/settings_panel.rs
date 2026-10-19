@@ -27,7 +27,12 @@ use std::collections::HashSet;
 pub enum SettingId {
     Back,
     Apply,
+    /// The single available package
     Update,
+    /// Fold-out listing several available packages
+    GroupUpdates,
+    /// One entry of that list (index into `available_updates`)
+    UpdateVersion(usize),
     Meters,
     SwapInput,
     TimecodeEnabled,
@@ -251,7 +256,8 @@ impl NeowaxApp {
         match id {
             SettingId::Back => "[Back]",
             SettingId::Apply => "Apply changes & restart",
-            SettingId::Update => "Install update",
+            SettingId::Update | SettingId::UpdateVersion(_) => "Install update",
+            SettingId::GroupUpdates => "Updates",
             SettingId::SwapInput => "Swap input L/R",
             SettingId::TimecodeEnabled => "Timecode control",
             SettingId::GroupAudio => "Audio",
@@ -417,12 +423,28 @@ impl NeowaxApp {
             row.style = RowStyle::Warning;
             rows.push(row);
         }
-        if let Some(info) = &self.available_update {
-            rows.push(Row::new(
+        match self.available_updates.as_slice() {
+            [] => {}
+            [only] => rows.push(Row::new(
                 SettingId::Update,
                 RowKind::Action,
-                &format!("Install update: {}", info.version),
-            ));
+                &Self::update_text(only, false),
+            )),
+            several => {
+                let label = format!("Updates ({} versions)", several.len());
+                rows.push(Row::new(SettingId::GroupUpdates, RowKind::Group, &label));
+                if self.settings.open.contains(&SettingId::GroupUpdates) {
+                    for (i, candidate) in several.iter().enumerate() {
+                        let mut row = Row::new(
+                            SettingId::UpdateVersion(i),
+                            RowKind::Action,
+                            &Self::update_text(candidate, true),
+                        );
+                        row.depth = 1;
+                        rows.push(row);
+                    }
+                }
+            }
         }
 
         // Crossed channels are worth interrupting for, even with Audio folded
@@ -474,6 +496,17 @@ impl NeowaxApp {
         );
         row.style = RowStyle::Warning;
         Some(row)
+    }
+
+    fn update_text(candidate: &UpdateCandidate, in_list: bool) -> String {
+        let older = candidate.ordering == VersionOrdering::Less;
+        let version = &candidate.info.version;
+        match (in_list, older) {
+            (false, false) => format!("Install update: {version}"),
+            (false, true) => format!("Install older version: {version}"),
+            (true, false) => format!("{version} (newer)"),
+            (true, true) => format!("{version} (older)"),
+        }
     }
 
     fn selectable_rows(&self) -> Vec<Row> {
@@ -583,11 +616,15 @@ impl NeowaxApp {
                 self.view = self.settings.return_to;
             }
             SettingId::SwapInput => self.toggle_setting(id),
-            SettingId::Update => {
+            SettingId::Update | SettingId::UpdateVersion(_) => {
+                let index = match id {
+                    SettingId::UpdateVersion(i) => i,
+                    _ => 0,
+                };
                 if self.is_deck_active() {
                     self.flash("Stop the deck first!");
-                } else if let Some(info) = self.available_update.clone() {
-                    self.begin_update(info);
+                } else if let Some(candidate) = self.available_updates.get(index).cloned() {
+                    self.begin_update(candidate);
                 }
             }
             SettingId::Apply => {

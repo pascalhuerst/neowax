@@ -72,28 +72,47 @@ fn parse_fields(path: &Path, fields: &str) -> Result<DebInfo> {
     })
 }
 
-/// Pick the usable neowax package with the highest version, if any.
-pub fn find_best(candidates: &[PathBuf]) -> Option<DebInfo> {
-    let mut best: Option<DebInfo> = None;
-    for path in candidates {
-        let info = match inspect(path) {
-            Ok(info) => info,
-            Err(e) => {
-                tracing::debug!("Ignoring {:?}: {}", path, e);
-                continue;
-            }
-        };
-        let better = match &best {
-            None => true,
-            Some(b) => {
-                compare_versions(&info.version, &b.version).is_ok_and(|o| o == Ordering::Greater)
-            }
-        };
-        if better {
-            best = Some(info);
+/// A package that could be installed, and how it compares to what is installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateCandidate {
+    pub info: DebInfo,
+    /// `Greater` for an upgrade, `Less` for a downgrade
+    pub ordering: Ordering,
+}
+
+/// All usable neowax packages among `candidates` that differ from the
+/// installed version, newest first. The installed version itself is left
+/// out (nothing to do), and so are repeated copies of the same version.
+pub fn find_updates(candidates: &[PathBuf], installed: &str) -> Vec<UpdateCandidate> {
+    let infos = candidates.iter().filter_map(|path| match inspect(path) {
+        Ok(info) => Some(info),
+        Err(e) => {
+            tracing::debug!("Ignoring {:?}: {}", path, e);
+            None
+        }
+    });
+    select_updates(infos, installed, |a, b| {
+        compare_versions(a, b).unwrap_or(Ordering::Equal)
+    })
+}
+
+fn select_updates(
+    infos: impl IntoIterator<Item = DebInfo>,
+    installed: &str,
+    compare: impl Fn(&str, &str) -> Ordering,
+) -> Vec<UpdateCandidate> {
+    let mut found: Vec<UpdateCandidate> = Vec::new();
+    for info in infos {
+        let ordering = compare(&info.version, installed);
+        let duplicate = found
+            .iter()
+            .any(|c| compare(&c.info.version, &info.version) == Ordering::Equal);
+        if ordering != Ordering::Equal && !duplicate {
+            found.push(UpdateCandidate { info, ordering });
         }
     }
-    best
+    found.sort_by(|a, b| compare(&b.info.version, &a.info.version));
+    found
 }
 
 /// Version of the currently installed package, falling back to the version
@@ -208,6 +227,41 @@ mod tests {
             "Package: vim\nVersion: 1\nArchitecture: arm64\n",
         );
         assert!(err.is_err());
+    }
+
+    fn deb(version: &str) -> DebInfo {
+        DebInfo {
+            path: PathBuf::from(format!("{version}.deb")),
+            version: version.to_string(),
+            architecture: "arm64".to_string(),
+        }
+    }
+
+    /// Plain numeric stand-in for dpkg's version comparison
+    fn numeric(a: &str, b: &str) -> Ordering {
+        let n = |v: &str| v.parse::<f64>().unwrap();
+        n(a).partial_cmp(&n(b)).unwrap()
+    }
+
+    #[test]
+    fn updates_exclude_the_installed_version() {
+        let found = select_updates([deb("1.5"), deb("1.4")], "1.5", numeric);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].info.version, "1.4");
+        assert_eq!(found[0].ordering, Ordering::Less);
+        assert!(select_updates([deb("1.5")], "1.5", numeric).is_empty());
+    }
+
+    #[test]
+    fn updates_are_sorted_newest_first_without_duplicates() {
+        let found = select_updates(
+            [deb("1.3"), deb("1.6"), deb("1.4"), deb("1.6")],
+            "1.4",
+            numeric,
+        );
+        let versions: Vec<_> = found.iter().map(|c| c.info.version.as_str()).collect();
+        assert_eq!(versions, ["1.6", "1.3"]);
+        assert_eq!(found[0].ordering, Ordering::Greater);
     }
 
     #[test]
