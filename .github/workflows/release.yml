@@ -27,7 +27,11 @@ jobs:
   build-deb-arm64:
     name: Build .deb (arm64)
     needs: check-version
-    runs-on: ubuntu-latest
+    # Deliberately an old Ubuntu: the binary links against the build machine's
+    # glibc, and the Raspberry Pi OS (Debian 12) target only has glibc 2.36.
+    # Ubuntu 22.04 has 2.35; "latest" (24.04, 2.39) produces a binary that
+    # fails to start on the Pi.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -67,6 +71,17 @@ jobs:
           PKG_CONFIG_ALLOW_CROSS: 1
           PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
         run: cargo deb --target aarch64-unknown-linux-gnu
+
+      - name: Check the binary runs on Debian 12 (glibc <= 2.36)
+        run: |
+          max=2.36
+          used=$(aarch64-linux-gnu-objdump -T target/aarch64-unknown-linux-gnu/release/neowax-ui \
+            | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n1)
+          echo "Highest glibc symbol version used: $used (allowed: $max)"
+          if [ "$(printf '%s\n%s\n' "$used" "$max" | sort -V | tail -n1)" != "$max" ]; then
+            echo "::error::neowax-ui needs glibc $used, newer than $max on the target"
+            exit 1
+          fi
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
