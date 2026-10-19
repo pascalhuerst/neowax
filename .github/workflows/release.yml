@@ -9,8 +9,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check-version:
+    name: Check tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The package and file names take their version from Cargo.toml, so a
+      # tag on a commit that wasn't bumped would publish a mislabelled package.
+      - run: |
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$cargo_version" != "$tag_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $cargo_version in Cargo.toml. Bump the version, commit, and re-tag."
+            exit 1
+          fi
+
   build-deb-arm64:
     name: Build .deb (arm64)
+    needs: check-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -60,6 +76,7 @@ jobs:
 
   build-appimage-x86_64:
     name: Build AppImage (x86_64)
+    needs: check-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
