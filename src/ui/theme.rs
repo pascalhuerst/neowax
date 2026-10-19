@@ -67,18 +67,9 @@ impl Accent {
         scale(self.0, 0.14)
     }
 
-    /// Color at `factor` of the accent's brightness, as float RGB.
-    pub fn scaled_rgb(&self, factor: f32) -> [f32; 3] {
-        [
-            self.0.r() as f32 * factor,
-            self.0.g() as f32 * factor,
-            self.0.b() as f32 * factor,
-        ]
-    }
-
-    pub fn bright_rgb(&self) -> [f32; 3] {
-        let c = self.bright();
-        [c.r() as f32, c.g() as f32, c.b() as f32]
+    /// The accent at `factor` of its brightness (0.0 black .. 1.0 the accent itself).
+    pub fn shade(&self, factor: f32) -> Color32 {
+        scale(self.0, factor)
     }
 }
 

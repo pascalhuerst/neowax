@@ -1,3 +1,4 @@
+use super::waveform_data::WaveformData;
 use anyhow::Result;
 use std::sync::Arc;
 use symphonia::core::audio::SampleBuffer;
@@ -115,55 +116,9 @@ impl Track {
         Arc::new(Self { pcm, rate, length })
     }
 
-    /// Extract mono waveform data as f32 for UI display.
-    /// Mixes stereo to mono and normalizes to -1.0..1.0.
-    pub fn waveform_data(&self) -> Vec<f32> {
-        self.pcm
-            .chunks(2)
-            .map(|pair| {
-                let mono = (pair[0] as f32 + pair[1] as f32) / 2.0;
-                mono / i16::MAX as f32
-            })
-            .collect()
-    }
-
-    /// Compute per-sample frequency band energies for colored waveform display.
-    /// Returns (low, mid, high) vectors of absolute amplitude per mono sample.
-    /// Low = bass (<200Hz), Mid = 200-4000Hz, High = treble (>4000Hz).
-    pub fn frequency_bands(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-        let rate = self.rate as f64;
-        let dt = 1.0 / rate;
-
-        // Single-pole IIR filter coefficients: alpha = dt / (RC + dt)
-        let rc_low = 1.0 / (2.0 * std::f64::consts::PI * 200.0);
-        let rc_high = 1.0 / (2.0 * std::f64::consts::PI * 4000.0);
-        let alpha_low = dt / (rc_low + dt);
-        let alpha_high = dt / (rc_high + dt);
-
-        let len = self.length;
-        let mut low = Vec::with_capacity(len);
-        let mut mid = Vec::with_capacity(len);
-        let mut high = Vec::with_capacity(len);
-
-        let mut lp_low: f64 = 0.0; // low-pass at 200 Hz
-        let mut lp_high: f64 = 0.0; // low-pass at 4000 Hz
-
-        for pair in self.pcm.chunks(2) {
-            let mono = (pair[0] as f64 + pair[1] as f64) / 2.0 / i16::MAX as f64;
-
-            lp_low += alpha_low * (mono - lp_low);
-            lp_high += alpha_high * (mono - lp_high);
-
-            let lo = lp_low;
-            let hi = mono - lp_high;
-            let mi = lp_high - lp_low;
-
-            low.push(lo.abs() as f32);
-            mid.push(mi.abs() as f32);
-            high.push(hi.abs() as f32);
-        }
-
-        (low, mid, high)
+    /// Summarise the track for drawing its waveform.
+    pub fn waveform_data(&self) -> WaveformData {
+        WaveformData::from_pcm(&self.pcm, self.rate)
     }
 
     /// Get stereo sample pair at the given frame index.

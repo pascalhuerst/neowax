@@ -3,13 +3,13 @@ mod settings_panel;
 
 use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
-use neowax::audio::{DeckState, Engine, Track, TrackCommand};
+use neowax::audio::{DeckState, Engine, Track, TrackCommand, WaveformData};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
 use neowax::online::{self, OnlineRelease};
 use neowax::settings::Settings;
 use neowax::sysinfo;
 use neowax::timecode::{ReverseDetector, TimecodeDef};
-use neowax::ui::{dim_alpha, Accent, Spinner, WaveformWidget, ACCENT_PRESETS};
+use neowax::ui::{dim_alpha, Accent, Spinner, WaveformMode, WaveformWidget, ACCENT_PRESETS};
 use neowax::update::{self, DebInfo, UpdateCandidate};
 use settings_panel::SettingsState;
 use std::cmp::Ordering as VersionOrdering;
@@ -163,8 +163,7 @@ struct UpdateState {
 
 struct LoadedTrack {
     track: Arc<Track>,
-    waveform: Vec<f32>,
-    bands: (Vec<f32>, Vec<f32>, Vec<f32>),
+    waveform: WaveformData,
     name: String,
     path: PathBuf,
     duration: f64,
@@ -255,7 +254,6 @@ impl NeowaxApp {
         track_sender: mpsc::Sender<TrackCommand>,
         library_dir: Option<PathBuf>,
         scan: library::Scan,
-        sample_rate: u32,
         timecode_resolution: f64,
         restart_requested: Arc<AtomicBool>,
         config: Settings,
@@ -282,14 +280,11 @@ impl NeowaxApp {
                     Ok(track) => {
                         load_progress_writer.store(900, Ordering::Relaxed);
                         let waveform = track.waveform_data();
-                        load_progress_writer.store(950, Ordering::Relaxed);
-                        let bands = track.frequency_bands();
                         load_progress_writer.store(1000, Ordering::Relaxed);
                         let duration = track.length as f64 / track.rate as f64;
                         loaded_tx
                             .send(LoadedTrack {
                                 track,
-                                bands,
                                 waveform,
                                 name,
                                 path: path.clone(),
@@ -319,7 +314,7 @@ impl NeowaxApp {
             selected_index: 0,
             current_track_path: None,
             spinner: Spinner::new(128.0),
-            waveform: WaveformWidget::new(sample_rate),
+            waveform: WaveformWidget::new(),
             track_name: String::new(),
             track_path: None,
             track_duration: 0.0,
@@ -390,8 +385,7 @@ impl NeowaxApp {
         self.track_path = None;
         self.track_duration = 0.0;
         self.current_track_path = None;
-        self.waveform
-            .update_samples(Vec::new(), None, self.waveform.sample_rate());
+        self.waveform.clear();
     }
 
     fn load_selected_track(&mut self) {
@@ -642,8 +636,7 @@ impl NeowaxApp {
 
     fn check_loaded_track(&mut self) {
         if let Ok(loaded) = self.loaded_rx.try_recv() {
-            self.waveform
-                .update_samples(loaded.waveform, Some(loaded.bands), loaded.track.rate);
+            self.waveform.set_data(loaded.waveform);
             self.track_sender
                 .send(TrackCommand::Load(loaded.track))
                 .ok();
@@ -833,7 +826,14 @@ impl NeowaxApp {
         // The waveform takes all the remaining height, minus the slim meter below it
         let meter_height = DECK_METER_BAR * 2.0 + 2.0;
         let waveform_height = (ui.available_height() - meter_height - SPACER).max(48.0);
-        self.waveform.show(ui, waveform_height);
+        let mode = if self.config.waveform_zoom {
+            WaveformMode::Zoomed {
+                window_secs: self.config.waveform_window as f32,
+            }
+        } else {
+            WaveformMode::Overview
+        };
+        self.waveform.show(ui, waveform_height, mode);
 
         ui.add_space(SPACER);
 
@@ -1411,7 +1411,6 @@ fn main() -> Result<(), eframe::Error> {
         track_sender,
         startup.library.clone(),
         scan,
-        startup.sample_rate,
         timecode_resolution,
         restart_requested.clone(),
         config,

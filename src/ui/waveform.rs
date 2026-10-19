@@ -1,152 +1,56 @@
 use super::Accent;
+use crate::audio::{WaveformData, FULL, HIGH, LOW, MID};
 use egui::{epaint::Mesh, Color32, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2};
 use std::time::Duration;
 
-const CURSOR_COLOR: Color32 = Color32::from_rgb(255, 255, 255);
+const CURSOR_COLOR: Color32 = Color32::WHITE;
 const BACKGROUND_COLOR: Color32 = Color32::from_rgb(12, 12, 18);
 const GRIDLINE_COLOR: Color32 = Color32::from_rgb(30, 30, 40);
 
-// Frequency band colors, derived from the accent by brightness.
-// Bass = darkest, Mid = accent, High = lightest
-fn band_color(accent: Accent, low: f32, mid: f32, high: f32) -> (Color32, Color32) {
-    let fill_low = accent.scaled_rgb(0.5);
-    let fill_mid = accent.scaled_rgb(0.62);
-    let fill_high = accent.scaled_rgb(0.7);
-    let edge_low = accent.scaled_rgb(0.82);
-    let edge_mid = accent.scaled_rgb(1.0);
-    let edge_high = accent.bright_rgb();
+/// Share of the half height the waveform may fill, leaving a little air.
+const MAX_FILL: f32 = 0.95;
+/// Smoothing window of the overview: longer than a beat, so the beat doesn't
+/// show up as stripes and what remains is the structure (breakdowns, drops).
+const OVERVIEW_SMOOTH_SECS: f64 = 1.2;
+/// Contrast curve of the overview band layers (above 1 favours the loud parts).
+const OVERVIEW_GAMMA: f32 = 1.8;
+/// Contrast curve of the close-up (below 1 lifts quieter detail slightly).
+const ZOOM_GAMMA: f32 = 0.9;
+/// How much taller the bright RMS core is drawn than the raw RMS.
+const CORE_GAIN: f32 = 1.5;
+/// Height of the overview strip above the close-up, as a share of the total.
+const STRIP_SHARE: f32 = 0.3;
+const STRIP_MIN: f32 = 36.0;
+const STRIP_MAX: f32 = 80.0;
+const STRIP_GAP: f32 = 3.0;
 
-    let total = low + mid + high;
-    if total < 1e-6 {
-        return (to_color(fill_mid), to_color(edge_mid));
-    }
-    let (wl, wm, wh) = (low / total, mid / total, high / total);
-    let blend = |l: [f32; 3], m: [f32; 3], h: [f32; 3]| {
-        to_color([
-            l[0] * wl + m[0] * wm + h[0] * wh,
-            l[1] * wl + m[1] * wm + h[1] * wh,
-            l[2] * wl + m[2] * wm + h[2] * wh,
-        ])
-    };
-    (
-        blend(fill_low, fill_mid, fill_high),
-        blend(edge_low, edge_mid, edge_high),
-    )
+/// How the track is shown.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WaveformMode {
+    /// The whole track across the full width.
+    Overview,
+    /// A small overview strip on top, and below it a close-up of
+    /// `window_secs` seconds that scrolls past a fixed playhead in the middle.
+    Zoomed { window_secs: f32 },
 }
 
-fn to_color(rgb: [f32; 3]) -> Color32 {
-    Color32::from_rgb(rgb[0] as u8, rgb[1] as u8, rgb[2] as u8)
-}
-
-/// Pre-computed min/max at power-of-2 block sizes for fast waveform drawing.
-struct WaveformMipmap {
-    levels: Vec<Vec<(f32, f32)>>,
-}
-
-impl WaveformMipmap {
-    fn build(samples: &[f32]) -> Self {
-        let mut levels = Vec::new();
-        let mut prev: Vec<(f32, f32)> = samples
-            .chunks(2)
-            .map(|c| {
-                let mut mn = c[0];
-                let mut mx = c[0];
-                for &s in &c[1..] {
-                    mn = mn.min(s);
-                    mx = mx.max(s);
-                }
-                (mn, mx)
-            })
-            .collect();
-        levels.push(prev.clone());
-        while prev.len() > 1 {
-            prev = prev
-                .chunks(2)
-                .map(|c| {
-                    if c.len() == 2 {
-                        (c[0].0.min(c[1].0), c[0].1.max(c[1].1))
-                    } else {
-                        c[0]
-                    }
-                })
-                .collect();
-            levels.push(prev.clone());
-        }
-        WaveformMipmap { levels }
-    }
-
-    fn query_range(&self, start: usize, end: usize, samples: &[f32]) -> (f32, f32) {
-        if start >= end {
-            return (0.0, 0.0);
-        }
-        let range_len = end - start;
-        if range_len < 8 {
-            let mut mn = 0.0f32;
-            let mut mx = 0.0f32;
-            let end = end.min(samples.len());
-            for &s in &samples[start..end] {
-                mn = mn.min(s);
-                mx = mx.max(s);
-            }
-            return (mn, mx);
-        }
-
-        let target_block = range_len / 2;
-        let level = if target_block >= 2 {
-            (target_block as f64).log2().floor() as usize - 1
-        } else {
-            0
-        };
-        let level = level.min(self.levels.len() - 1);
-        let mip = &self.levels[level];
-        let block_size = 1 << (level + 1);
-
-        let mip_start = start / block_size;
-        let mip_end = end.div_ceil(block_size).min(mip.len());
-
-        let mut mn = 0.0f32;
-        let mut mx = 0.0f32;
-        for block in &mip[mip_start..mip_end] {
-            mn = mn.min(block.0);
-            mx = mx.max(block.1);
-        }
-        (mn, mx)
-    }
-}
-
-#[derive(Debug)]
 pub struct WaveformWidget {
-    samples: Vec<f32>,
-    sample_rate: u32,
-    duration: Duration,
-    current_position: Duration,
-    mipmap: Option<MipmapHolder>,
-    band_low: Vec<f32>,
-    band_mid: Vec<f32>,
-    band_high: Vec<f32>,
+    data: Option<WaveformData>,
+    position: Duration,
     accent: Accent,
 }
 
-struct MipmapHolder(WaveformMipmap);
-impl std::fmt::Debug for MipmapHolder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MipmapHolder")
-            .field("levels", &self.0.levels.len())
-            .finish()
+impl Default for WaveformWidget {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl WaveformWidget {
-    pub fn new(sample_rate: u32) -> Self {
+    pub fn new() -> Self {
         Self {
-            samples: Vec::new(),
-            sample_rate,
-            duration: Duration::from_secs(0),
-            current_position: Duration::from_secs(0),
-            mipmap: None,
-            band_low: Vec::new(),
-            band_mid: Vec::new(),
-            band_high: Vec::new(),
+            data: None,
+            position: Duration::ZERO,
             accent: Accent::default(),
         }
     }
@@ -155,224 +59,210 @@ impl WaveformWidget {
         self.accent = accent;
     }
 
-    pub fn update_samples(
-        &mut self,
-        samples: Vec<f32>,
-        bands: Option<(Vec<f32>, Vec<f32>, Vec<f32>)>,
-        sample_rate: u32,
-    ) {
-        self.sample_rate = sample_rate;
-        self.duration = Duration::from_secs_f64(samples.len() as f64 / self.sample_rate as f64);
-        self.mipmap = if samples.is_empty() {
-            None
-        } else {
-            Some(MipmapHolder(WaveformMipmap::build(&samples)))
-        };
-        if let Some((low, mid, high)) = bands {
-            self.band_low = low;
-            self.band_mid = mid;
-            self.band_high = high;
-        } else {
-            self.band_low.clear();
-            self.band_mid.clear();
-            self.band_high.clear();
-        }
-        self.samples = samples;
+    pub fn set_data(&mut self, data: WaveformData) {
+        self.data = Some(data);
+        self.position = Duration::ZERO;
     }
 
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    pub fn clear(&mut self) {
+        self.data = None;
+        self.position = Duration::ZERO;
     }
 
     pub fn set_position(&mut self, position: Duration) {
-        if position > self.duration {
-            return;
-        }
-        self.current_position = position;
+        self.position = position;
     }
 
-    /// Draw the waveform overview, `height` pixels tall and as wide as the available space.
-    pub fn show(&mut self, ui: &mut Ui, height: f32) -> Response {
-        let available_width = ui.available_width();
-        let current_pos = self.current_position.as_secs_f64();
-        let duration_secs = self.duration.as_secs_f64();
-
-        // Overview waveform
-        let (overview_rect, overview_response) =
-            ui.allocate_exact_size(Vec2::new(available_width, height), Sense::hover());
-        self.draw_waveform(ui, &overview_rect, None, true);
-
-        // Position cursor on overview
-        if duration_secs > 0.0 {
-            let pos_ratio = current_pos / duration_secs;
-            let x = overview_rect.left() + overview_rect.width() * pos_ratio as f32;
-            ui.painter().line_segment(
-                [
-                    Pos2::new(x, overview_rect.top()),
-                    Pos2::new(x, overview_rect.bottom()),
-                ],
-                Stroke::new(1.5_f32, CURSOR_COLOR),
-            );
-        }
-
-        overview_response
-    }
-
-    fn draw_waveform(
-        &self,
-        ui: &mut Ui,
-        rect: &Rect,
-        view_range: Option<(f64, f64)>,
-        is_overview: bool,
-    ) {
+    /// Draw the waveform, `height` pixels tall and as wide as the available space.
+    pub fn show(&mut self, ui: &mut Ui, height: f32, mode: WaveformMode) -> Response {
+        let (rect, response) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let painter = ui.painter();
 
-        painter.rect_filled(*rect, 0.0, BACKGROUND_COLOR);
+        match mode {
+            WaveformMode::Overview => {
+                self.draw_overview(painter, rect);
+                self.draw_overview_cursor(painter, rect, None);
+            }
+            WaveformMode::Zoomed { window_secs } => {
+                let strip = (height * STRIP_SHARE).clamp(STRIP_MIN, STRIP_MAX);
+                let strip_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), strip));
+                let zoom_rect = Rect::from_min_max(
+                    Pos2::new(rect.left(), strip_rect.bottom() + STRIP_GAP),
+                    rect.max,
+                );
+                self.draw_overview(painter, strip_rect);
+                self.draw_overview_cursor(painter, strip_rect, Some(window_secs as f64));
+                self.draw_zoom(painter, zoom_rect, window_secs as f64);
+            }
+        }
+        response
+    }
 
-        let center_y = rect.center().y;
+    fn draw_background(painter: &egui::Painter, rect: Rect) {
+        painter.rect_filled(rect, 0.0, BACKGROUND_COLOR);
         painter.line_segment(
             [
-                Pos2::new(rect.left(), center_y),
-                Pos2::new(rect.right(), center_y),
+                Pos2::new(rect.left(), rect.center().y),
+                Pos2::new(rect.right(), rect.center().y),
             ],
             Stroke::new(1.0_f32, GRIDLINE_COLOR),
         );
+    }
 
-        if !is_overview {
-            for frac in [0.25, 0.75] {
-                let y = rect.top() + rect.height() * frac;
-                painter.line_segment(
-                    [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-                    Stroke::new(0.5_f32, GRIDLINE_COLOR),
+    /// The playhead on the overview, plus (when zoomed) the span the close-up shows.
+    fn draw_overview_cursor(&self, painter: &egui::Painter, rect: Rect, window: Option<f64>) {
+        let Some(data) = &self.data else {
+            return;
+        };
+        let duration = data.duration_secs();
+        if duration <= 0.0 {
+            return;
+        }
+        let at = |secs: f64| rect.left() + rect.width() * (secs / duration).clamp(0.0, 1.0) as f32;
+        let now = self.position.as_secs_f64();
+
+        if let Some(window) = window {
+            let span = Rect::from_x_y_ranges(
+                at(now - window / 2.0)..=at(now + window / 2.0),
+                rect.y_range(),
+            );
+            painter.rect_filled(span, 0.0, Color32::from_white_alpha(22));
+        }
+        let x = at(now);
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            Stroke::new(1.5_f32, CURSOR_COLOR),
+        );
+    }
+
+    /// The whole track: three smoothed band layers (bass darkest and behind,
+    /// highs lightest), all in shades of the accent color.
+    fn draw_overview(&self, painter: &egui::Painter, rect: Rect) {
+        Self::draw_background(painter, rect);
+        let Some(data) = &self.data else {
+            return;
+        };
+        let (hops, hop_secs) = (data.hops(), data.hop_secs());
+        let columns = rect.width() as usize;
+        if hops == 0 || columns == 0 {
+            return;
+        }
+        let duration = data.duration_secs();
+        let smooth = OVERVIEW_SMOOTH_SECS.max(duration / columns as f64);
+        let refs = data.overview_ref();
+        let colors = [self.accent.dark(), self.accent.base(), self.accent.light()];
+
+        let mut mesh = Mesh::default();
+        let center_y = rect.center().y;
+        let half = rect.height() / 2.0 * MAX_FILL;
+        for x in 0..columns {
+            let t = (x as f64 + 0.5) / columns as f64 * duration;
+            let a = ((t - smooth / 2.0) / hop_secs).floor().max(0.0) as usize;
+            let b = (((t + smooth / 2.0) / hop_secs).ceil() as usize).clamp(a + 1, hops);
+            let mut layers = [LOW, MID, HIGH].map(|band| {
+                let level = (data.rms(band, a, b) / refs[band]).clamp(0.0, 1.0);
+                (level.powf(OVERVIEW_GAMMA), colors[band])
+            });
+            // Tallest first, so the smaller layers stay visible in front of it
+            layers.sort_by(|p, q| q.0.total_cmp(&p.0));
+            let left = rect.left() + x as f32;
+            for (level, color) in layers {
+                add_quad(
+                    &mut mesh,
+                    left,
+                    center_y - level * half,
+                    center_y + level * half,
+                    color,
                 );
             }
         }
+        painter.add(Shape::mesh(mesh));
+    }
 
-        if self.samples.is_empty() {
+    /// A close-up of `window_secs` around the playhead. Columns sit on a fixed
+    /// time grid and the whole picture slides past the centre line, so it
+    /// scrolls smoothly instead of shimmering. Each column shows the true
+    /// peaks in a shade that follows the bass/treble balance, with the RMS
+    /// as a brighter core.
+    fn draw_zoom(&self, painter: &egui::Painter, rect: Rect, window_secs: f64) {
+        Self::draw_background(painter, rect);
+        let Some(data) = &self.data else {
+            return;
+        };
+        let (hops, hop_secs) = (data.hops() as isize, data.hop_secs());
+        let columns = rect.width() as usize;
+        if hops == 0 || columns == 0 {
             return;
         }
+        // Hops per column: the window, rounded to a whole number of hops
+        let per_col = ((window_secs / columns as f64 / hop_secs).round() as isize).max(1);
+        let playhead = self.position.as_secs_f64() / hop_secs; // in hops
+        let first = (playhead / per_col as f64 - columns as f64 / 2.0).floor() as isize;
+        let peak_ref = data.peak_ref();
 
-        let total_samples = self.samples.len();
-        let width = rect.width() as f64;
-
-        let (start_sample_f, samples_per_pixel) =
-            if let Some((start_secs, duration_secs)) = view_range {
-                let start = start_secs * self.sample_rate as f64;
-                let total = duration_secs * self.sample_rate as f64;
-                (start, total / width)
-            } else {
-                (0.0, total_samples as f64 / width)
-            };
-
-        let half_height = rect.height() / 2.0;
-
-        let use_mipmap = self.mipmap.is_some() && samples_per_pixel >= 8.0;
-        let col_count = rect.width() as usize;
-
-        let has_bands = !self.band_low.is_empty();
-
-        let mut columns: Vec<(f32, f32, Color32, Color32)> = Vec::with_capacity(col_count);
-        for x in 0..col_count {
-            let s_start_f = start_sample_f + x as f64 * samples_per_pixel;
-            let s_end_f = s_start_f + samples_per_pixel;
-            let s_start = s_start_f as usize;
-            let s_end = (s_end_f.ceil() as usize).min(total_samples);
-
-            if s_start >= total_samples {
-                break;
+        let mut mesh = Mesh::default();
+        let center = rect.center();
+        let half = rect.height() / 2.0 * MAX_FILL;
+        let level = |v: f32| (v / peak_ref).clamp(0.0, 1.0).powf(ZOOM_GAMMA);
+        for i in 0..=(columns + 1) as isize {
+            let a = (first + i) * per_col;
+            let b = a + per_col;
+            if b <= 0 || a >= hops {
+                continue;
+            }
+            let (a, b) = (a.max(0) as usize, b.min(hops) as usize);
+            let x = center.x + (((first + i) * per_col) as f64 - playhead) as f32 / per_col as f32;
+            if x < rect.left() - 1.0 || x > rect.right() {
+                continue;
             }
 
-            let (min, max) = if use_mipmap {
-                self.mipmap
-                    .as_ref()
-                    .unwrap()
-                    .0
-                    .query_range(s_start, s_end, &self.samples)
-            } else {
-                let mut mn = 0.0f32;
-                let mut mx = 0.0f32;
-                for &sample in &self.samples[s_start..s_end] {
-                    mn = mn.min(sample);
-                    mx = mx.max(sample);
-                }
-                (mn, mx)
-            };
+            let (lowest, highest) = data.min_max(a, b);
+            let rms = data.rms(FULL, a, b);
+            let (low, mid, high) = (
+                data.mean_square(LOW, a, b),
+                data.mean_square(MID, a, b),
+                data.mean_square(HIGH, a, b),
+            );
+            // 0 = all bass .. 1 = all treble
+            let balance = ((mid * 0.5 + high) / (low + mid + high).max(1e-12)) as f32;
+            let outer = self.accent.shade(0.5 + 0.5 * balance);
 
-            let (fill, edge) = if has_bands {
-                let band_end = s_end.min(self.band_low.len());
-                if s_start < band_end {
-                    let mut sum_low = 0.0f32;
-                    let mut sum_mid = 0.0f32;
-                    let mut sum_high = 0.0f32;
-                    for i in s_start..band_end {
-                        sum_low += self.band_low[i] * self.band_low[i];
-                        sum_mid += self.band_mid[i] * self.band_mid[i];
-                        sum_high += self.band_high[i] * self.band_high[i];
-                    }
-                    let n = (band_end - s_start) as f32;
-                    band_color(
-                        self.accent,
-                        (sum_low / n).sqrt(),
-                        (sum_mid / n).sqrt(),
-                        (sum_high / n).sqrt(),
-                    )
-                } else {
-                    band_color(self.accent, 0.0, 0.0, 0.0)
-                }
-            } else {
-                band_color(self.accent, 0.0, 0.0, 0.0)
-            };
-
-            columns.push((min, max, fill, edge));
+            add_quad(
+                &mut mesh,
+                x,
+                center.y - level(highest) * half,
+                center.y + level(-lowest) * half,
+                outer,
+            );
+            let core = level(rms * CORE_GAIN) * half;
+            add_quad(
+                &mut mesh,
+                x,
+                center.y - core,
+                center.y + core,
+                self.accent.bright(),
+            );
         }
-
-        if columns.is_empty() {
-            return;
-        }
-
-        // Build filled mesh — each column gets its own quad for per-column color
-        let mut mesh = Mesh::default();
-        mesh.reserve_triangles(columns.len() * 2);
-        mesh.reserve_vertices(columns.len() * 4);
-
-        for (x, &(min, max, fill, _)) in columns.iter().enumerate() {
-            let px = rect.left() + x as f32;
-            let px_next = px + 1.0;
-            let y_top = center_y - max * half_height;
-            let y_bot = center_y - min * half_height;
-            let base = mesh.vertices.len() as u32;
-            mesh.colored_vertex(Pos2::new(px, y_top), fill);
-            mesh.colored_vertex(Pos2::new(px, y_bot), fill);
-            mesh.colored_vertex(Pos2::new(px_next, y_top), fill);
-            mesh.colored_vertex(Pos2::new(px_next, y_bot), fill);
-            mesh.add_triangle(base, base + 1, base + 2);
-            mesh.add_triangle(base + 1, base + 3, base + 2);
-        }
-
         painter.add(Shape::mesh(mesh));
 
-        // Contour lines — draw per-segment to match column color
-        for x in 0..columns.len().saturating_sub(1) {
-            let (_, max_a, _, edge_a) = columns[x];
-            let (_, max_b, _, _) = columns[x + 1];
-            let xa = rect.left() + x as f32;
-            let xb = xa + 1.0;
-            painter.line_segment(
-                [
-                    Pos2::new(xa, center_y - max_a * half_height),
-                    Pos2::new(xb, center_y - max_b * half_height),
-                ],
-                Stroke::new(1.0_f32, edge_a),
-            );
-            let (min_a, _, _, _) = columns[x];
-            let (min_b, _, _, _) = columns[x + 1];
-            painter.line_segment(
-                [
-                    Pos2::new(xa, center_y - min_a * half_height),
-                    Pos2::new(xb, center_y - min_b * half_height),
-                ],
-                Stroke::new(1.0_f32, edge_a),
-            );
-        }
+        painter.line_segment(
+            [
+                Pos2::new(center.x, rect.top()),
+                Pos2::new(center.x, rect.bottom()),
+            ],
+            Stroke::new(1.5_f32, CURSOR_COLOR),
+        );
     }
+}
+
+/// A one pixel wide solid quad from `top` to `bottom` at `left`.
+fn add_quad(mesh: &mut Mesh, left: f32, top: f32, bottom: f32, color: Color32) {
+    let base = mesh.vertices.len() as u32;
+    mesh.colored_vertex(Pos2::new(left, top), color);
+    mesh.colored_vertex(Pos2::new(left, bottom), color);
+    mesh.colored_vertex(Pos2::new(left + 1.0, top), color);
+    mesh.colored_vertex(Pos2::new(left + 1.0, bottom), color);
+    mesh.add_triangle(base, base + 1, base + 2);
+    mesh.add_triangle(base + 1, base + 3, base + 2);
 }

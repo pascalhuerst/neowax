@@ -6,6 +6,7 @@ mod player;
 pub mod realtime;
 mod realtime_player;
 mod track;
+mod waveform_data;
 
 pub use audio_devices::*;
 pub use buffer::*;
@@ -17,5 +18,6 @@ pub use engine::*;
 pub use player::{Player, TimecodeState};
 pub use realtime_player::*;
 pub use track::Track;
+pub use waveform_data::{WaveformData, FULL, HIGH, LOW, MID};
 
 pub const CHANNELS: usize = 2;

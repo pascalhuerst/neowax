@@ -19,6 +19,7 @@ use super::*;
 use neowax::audio::list_alsa_devices;
 use neowax::settings::{
     library_candidates, BRIGHTNESS_LEVELS, CAPTURE_BUFFERS, PLAYBACK_BUFFERS, SAMPLE_RATES, SPEEDS,
+    WAVEFORM_WINDOWS,
 };
 use neowax::timecode::TimecodeDef;
 use std::collections::HashSet;
@@ -46,6 +47,8 @@ pub enum SettingId {
     GroupPitch,
     PitchPlot,
     Brightness,
+    WaveformZoom,
+    WaveformWindow,
     InputDevice,
     OutputDevice,
     Library,
@@ -284,6 +287,8 @@ impl NeowaxApp {
             SettingId::PlaybackCpu => "Playback CPU",
             SettingId::Accent => "Accent color",
             SettingId::Brightness => "Brightness",
+            SettingId::WaveformZoom => "Zoomed waveform",
+            SettingId::WaveformWindow => "Zoom window",
             SettingId::Meters | SettingId::PitchPlot => "",
         }
     }
@@ -293,6 +298,8 @@ impl NeowaxApp {
         match id {
             SettingId::Accent => ACCENT_PRESETS[self.accent_index].0.to_string(),
             SettingId::Brightness => format!("{}%", s.brightness),
+            SettingId::WaveformZoom => on_off(s.waveform_zoom).to_string(),
+            SettingId::WaveformWindow => format!("{} s", s.waveform_window),
             SettingId::SwapInput => {
                 on_off(self.deck_state.swap_input.load(Ordering::Relaxed)).to_string()
             }
@@ -376,6 +383,9 @@ impl NeowaxApp {
                     .map_or(String::new(), |p| p.display().to_string());
                 c.library = Some(PathBuf::from(cycle_string(candidates, &current, delta)));
             }
+            SettingId::WaveformWindow => {
+                c.waveform_window = cycle(WAVEFORM_WINDOWS, &c.waveform_window, delta)
+            }
             SettingId::Brightness => {
                 // No wrap-around: turning up at 100% must not jump to the darkest step
                 let at = BRIGHTNESS_LEVELS
@@ -414,6 +424,7 @@ impl NeowaxApp {
                 self.config.swap_input = swapped;
             }
             SettingId::Phono => self.config.phono = !self.config.phono,
+            SettingId::WaveformZoom => self.config.waveform_zoom = !self.config.waveform_zoom,
             SettingId::OnlineUpdates => {
                 self.config.online_updates = !self.config.online_updates;
                 // Turning it on checks right away; turning it off forgets the result
@@ -505,7 +516,12 @@ impl NeowaxApp {
             ),
             (
                 SettingId::GroupDisplay,
-                &[SettingId::Accent, SettingId::Brightness],
+                &[
+                    SettingId::Accent,
+                    SettingId::Brightness,
+                    SettingId::WaveformZoom,
+                    SettingId::WaveformWindow,
+                ],
             ),
             (SettingId::GroupPitch, &[SettingId::PitchPlot]),
         ];
@@ -516,10 +532,14 @@ impl NeowaxApp {
                     if id == SettingId::OnlineCheck && !self.config.online_updates {
                         continue;
                     }
+                    if id == SettingId::WaveformWindow && !self.config.waveform_zoom {
+                        continue;
+                    }
                     let kind = match id {
                         SettingId::Phono
                         | SettingId::SwapInput
                         | SettingId::TimecodeEnabled
+                        | SettingId::WaveformZoom
                         | SettingId::OnlineUpdates => RowKind::Toggle,
                         SettingId::OnlineCheck => RowKind::Action,
                         SettingId::PitchPlot | SettingId::Meters => RowKind::Display,
