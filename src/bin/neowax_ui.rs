@@ -239,6 +239,8 @@ struct NeowaxApp {
     /// Close the window on the next frame (after "Apply & restart")
     close_requested: bool,
     os_version: String,
+    /// Cores reserved with isolcpus= (shown next to the CPU settings)
+    isolated_cpus: Vec<usize>,
     /// Best neowax .deb found while scanning the library
     available_updates: Vec<UpdateCandidate>,
     online: OnlineState,
@@ -341,6 +343,7 @@ impl NeowaxApp {
             locked,
             close_requested: false,
             os_version: sysinfo::os_version(),
+            isolated_cpus: sysinfo::isolated_cpus(),
             installed_version: installed_version.clone(),
             online: OnlineState::Idle,
             available_updates: update::find_updates(&scan.packages, &installed_version),

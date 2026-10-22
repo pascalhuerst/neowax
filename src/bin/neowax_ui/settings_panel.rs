@@ -175,6 +175,16 @@ fn cycle<T: PartialEq + Copy>(list: &[T], current: &T, delta: isize) -> T {
     list[(at + delta).rem_euclid(list.len() as isize) as usize]
 }
 
+/// CPU cores that can be chosen for the audio threads: every online core.
+/// Not `available_parallelism()`: that follows the calling thread's affinity,
+/// which excludes cores reserved with `isolcpus=` (the very cores the audio
+/// threads are meant to be pinned to) and would never offer them.
+fn cpu_choices() -> Vec<usize> {
+    // SAFETY: sysconf has no preconditions
+    let online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+    (0..online.max(1) as usize).collect()
+}
+
 fn setting_key(id: SettingId) -> Option<&'static str> {
     Some(match id {
         SettingId::SwapInput => "swap_input",
@@ -325,9 +335,18 @@ impl NeowaxApp {
             SettingId::SampleRate => format!("{} Hz", s.sample_rate),
             SettingId::Buffer => format!("{} frames", s.buffer),
             SettingId::CaptureBuffer => format!("{} frames", s.capture_buffer),
-            SettingId::CaptureCpu => format!("core {}", s.capture_cpu),
-            SettingId::PlaybackCpu => format!("core {}", s.playback_cpu),
+            SettingId::CaptureCpu => self.core_text(s.capture_cpu),
+            SettingId::PlaybackCpu => self.core_text(s.playback_cpu),
             _ => String::new(),
+        }
+    }
+
+    /// "core 2", or "core 2 (isolated)" if the kernel keeps other threads off it.
+    fn core_text(&self, core: usize) -> String {
+        if self.isolated_cpus.contains(&core) {
+            format!("core {core} (isolated)")
+        } else {
+            format!("core {core}")
         }
     }
 
@@ -359,8 +378,7 @@ impl NeowaxApp {
 
     /// Change a choice setting by `delta` entries.
     fn step_setting(&mut self, id: SettingId, delta: isize) {
-        let cpus: Vec<usize> =
-            (0..std::thread::available_parallelism().map_or(1, |n| n.get())).collect();
+        let cpus = cpu_choices();
         let speeds: Vec<f64> = SPEEDS.iter().map(|(_, v)| *v).collect();
         let c = &mut self.config;
         match id {
@@ -867,6 +885,15 @@ impl NeowaxApp {
                         .size(14.0),
                 );
                 ui.label(RichText::new(&self.os_version).color(info_color).size(14.0));
+                ui.label(
+                    RichText::new(format!(
+                        "CPUs: {} (isolated: {})",
+                        cpu_choices().len(),
+                        sysinfo::format_cpu_list(&self.isolated_cpus)
+                    ))
+                    .color(info_color)
+                    .size(14.0),
+                );
                 if self.needs_restart() {
                     ui.label(
                         RichText::new("* applied after restart")
@@ -884,6 +911,26 @@ impl NeowaxApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_choices_ignore_the_threads_affinity() {
+        let all = cpu_choices();
+        assert!(!all.is_empty());
+        // A thread pinned to a single core must still be offered every core
+        let seen = std::thread::spawn(|| {
+            // SAFETY: plain libc calls on a zeroed cpu_set_t
+            unsafe {
+                let mut set: libc::cpu_set_t = std::mem::zeroed();
+                libc::CPU_ZERO(&mut set);
+                libc::CPU_SET(0, &mut set);
+                libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+            }
+            cpu_choices()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(seen, all);
+    }
 
     #[test]
     fn cycle_wraps_in_both_directions() {
