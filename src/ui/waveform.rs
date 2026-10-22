@@ -69,6 +69,10 @@ impl WaveformWidget {
         self.position = Duration::ZERO;
     }
 
+    pub fn has_data(&self) -> bool {
+        self.data.is_some()
+    }
+
     pub fn set_position(&mut self, position: Duration) {
         self.position = position;
     }

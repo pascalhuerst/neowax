@@ -28,6 +28,13 @@ const METER_LABEL_WIDTH: f32 = 32.0;
 const METER_FLOOR_DB: f32 = -48.0;
 /// Meter color above -3 dB
 const CLIP_COLOR: Color32 = Color32::from_rgb(200, 80, 30);
+/// Screens at least this tall get a mini waveform in the library's status bar;
+/// shorter ones a plain progress bar.
+const MINI_WAVEFORM_MIN_SCREEN: f32 = 420.0;
+const MINI_WAVEFORM_HEIGHT: f32 = 28.0;
+const PROGRESS_BAR_HEIGHT: f32 = 6.0;
+/// Width reserved for each of the two time labels in the status bar
+const STATUS_TIME_WIDTH: f32 = 72.0;
 /// Thickness of one bar of the slim output meter on the deck view
 const DECK_METER_BAR: f32 = 4.0;
 
@@ -711,6 +718,67 @@ impl NeowaxApp {
         }
     }
 
+    /// Status bar at the bottom of the library and settings: how far the loaded track is,
+    /// as a mini waveform with the playhead if the screen is tall enough,
+    /// otherwise as a progress bar, with the elapsed and remaining time on the sides.
+    fn draw_library_status(&mut self, ui: &mut egui::Ui, screen_height: f32) {
+        let elapsed = self.deck_state.get_elapsed();
+        let remaining = self.track_duration - elapsed;
+        let mini = screen_height >= MINI_WAVEFORM_MIN_SCREEN && self.waveform.has_data();
+        let height = if mini {
+            MINI_WAVEFORM_HEIGHT
+        } else {
+            PROGRESS_BAR_HEIGHT.max(16.0)
+        };
+
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), height),
+            egui::Sense::hover(),
+        );
+        let time_font = egui::FontId::monospace(14.0);
+        let painter = ui.painter();
+        painter.text(
+            rect.left_center(),
+            egui::Align2::LEFT_CENTER,
+            Self::format_time(elapsed),
+            time_font.clone(),
+            self.accent.base(),
+        );
+        painter.text(
+            rect.right_center(),
+            egui::Align2::RIGHT_CENTER,
+            format!("-{}", Self::format_time(remaining)),
+            time_font,
+            self.accent.base(),
+        );
+
+        let middle = egui::Rect::from_min_max(
+            egui::pos2(rect.left() + STATUS_TIME_WIDTH, rect.top()),
+            egui::pos2(rect.right() - STATUS_TIME_WIDTH, rect.bottom()),
+        );
+        if mini {
+            ui.allocate_ui_at_rect(middle, |ui| {
+                self.waveform
+                    .show(ui, middle.height(), WaveformMode::Overview);
+            });
+        } else {
+            let bar = egui::Rect::from_center_size(
+                middle.center(),
+                egui::vec2(middle.width(), PROGRESS_BAR_HEIGHT),
+            );
+            let painter = ui.painter();
+            painter.rect_filled(bar, 0.0, Color32::from_rgb(20, 20, 20));
+            let done = if self.track_duration > 0.0 {
+                (elapsed / self.track_duration).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            };
+            let filled =
+                egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * done, bar.height()));
+            painter.rect_filled(filled, 0.0, self.accent.base());
+        }
+    }
+
     fn format_time(secs: f64) -> String {
         if !secs.is_finite() || secs < 0.0 {
             return "--:--".to_string();
@@ -1219,6 +1287,24 @@ impl eframe::App for NeowaxApp {
             if self.status_timer <= 0.0 {
                 self.status_message.clear();
             }
+        }
+
+        // The library and settings show how far the loaded track is, along the very bottom
+        if matches!(self.view, View::Library | View::Settings) && self.track_duration > 0.0 {
+            let screen_height = ctx.screen_rect().height();
+            egui::TopBottomPanel::bottom("track_status")
+                .frame(
+                    Frame::none()
+                        .fill(Color32::from_rgb(16, 16, 16))
+                        .inner_margin(Margin {
+                            left: BORDER,
+                            right: BORDER,
+                            top: 0.0,
+                            bottom: BORDER,
+                        }),
+                )
+                .show_separator_line(false)
+                .show(ctx, |ui| self.draw_library_status(ui, screen_height));
         }
 
         egui::CentralPanel::default()
