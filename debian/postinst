@@ -17,7 +17,7 @@ if [ "$1" = "configure" ]; then
     config=/var/lib/neowax/.config/neowax
     install -d -o neowax -g neowax -m 0755 /var/lib/neowax /var/lib/neowax/.config "$config"
     if [ ! -e "$config/settings.toml" ]; then
-        printf 'library = "/media"\n' > "$config/settings.toml"
+        printf 'library = "/media"\nhide_cursor = true\n' > "$config/settings.toml"
         chown neowax:neowax "$config/settings.toml"
     fi
 

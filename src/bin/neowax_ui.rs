@@ -1426,6 +1426,10 @@ impl eframe::App for NeowaxApp {
                 }
             });
 
+        if self.config.hide_cursor {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
+
         // Dim the whole screen: a translucent black layer over everything
         let alpha = dim_alpha(self.config.brightness);
         if alpha > 0 {

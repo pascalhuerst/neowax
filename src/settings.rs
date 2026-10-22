@@ -21,6 +21,9 @@ pub struct Settings {
     pub waveform_zoom: bool,
     /// Seconds of track the close-up shows (see `WAVEFORM_WINDOWS`)
     pub waveform_window: u32,
+    /// Hide the mouse pointer over the window (for kiosk use; an encoder or
+    /// touch screen needs none)
+    pub hide_cursor: bool,
     /// Screen brightness in percent (see `BRIGHTNESS_LEVELS`)
     pub brightness: u8,
     /// Follow the timecode. When off, selecting a track plays it straight away.
@@ -75,6 +78,7 @@ impl Default for Settings {
             accent: "Amber".to_string(),
             swap_input: false,
             brightness: 100,
+            hide_cursor: false,
             load_while_moving: false,
             waveform_zoom: true,
             waveform_window: 16,

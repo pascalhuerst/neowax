@@ -49,6 +49,7 @@ pub enum SettingId {
     ShowLogs,
     PitchPlot,
     Brightness,
+    HideCursor,
     WaveformZoom,
     WaveformWindow,
     InputDevice,
@@ -301,6 +302,7 @@ impl NeowaxApp {
             SettingId::PlaybackCpu => "Playback CPU",
             SettingId::Accent => "Accent color",
             SettingId::Brightness => "Brightness",
+            SettingId::HideCursor => "Hide mouse pointer",
             SettingId::WaveformZoom => "Zoomed waveform",
             SettingId::WaveformWindow => "Zoom window",
             SettingId::Meters | SettingId::PitchPlot => "",
@@ -312,6 +314,7 @@ impl NeowaxApp {
         match id {
             SettingId::Accent => ACCENT_PRESETS[self.accent_index].0.to_string(),
             SettingId::Brightness => format!("{}%", s.brightness),
+            SettingId::HideCursor => on_off(s.hide_cursor).to_string(),
             SettingId::WaveformZoom => on_off(s.waveform_zoom).to_string(),
             SettingId::WaveformWindow => format!("{} s", s.waveform_window),
             SettingId::SwapInput => {
@@ -448,6 +451,7 @@ impl NeowaxApp {
             }
             SettingId::Phono => self.config.phono = !self.config.phono,
             SettingId::WaveformZoom => self.config.waveform_zoom = !self.config.waveform_zoom,
+            SettingId::HideCursor => self.config.hide_cursor = !self.config.hide_cursor,
             SettingId::LoadWhileMoving => {
                 self.config.load_while_moving = !self.config.load_while_moving
             }
@@ -545,6 +549,7 @@ impl NeowaxApp {
                 &[
                     SettingId::Accent,
                     SettingId::Brightness,
+                    SettingId::HideCursor,
                     SettingId::WaveformZoom,
                     SettingId::WaveformWindow,
                 ],
@@ -569,6 +574,7 @@ impl NeowaxApp {
                         | SettingId::SwapInput
                         | SettingId::TimecodeEnabled
                         | SettingId::WaveformZoom
+                        | SettingId::HideCursor
                         | SettingId::LoadWhileMoving
                         | SettingId::OnlineUpdates => RowKind::Toggle,
                         SettingId::OnlineCheck | SettingId::ShowLogs => RowKind::Action,
