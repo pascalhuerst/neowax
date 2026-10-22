@@ -45,7 +45,7 @@ pub enum SettingId {
     GroupAudio,
     GroupSystem,
     GroupDisplay,
-    GroupPitch,
+    GroupDebug,
     PitchPlot,
     Brightness,
     WaveformZoom,
@@ -80,7 +80,6 @@ const RESTART_SETTINGS: &[SettingId] = &[
 ];
 
 const AUDIO_ROWS: &[SettingId] = &[
-    SettingId::Meters,
     SettingId::TimecodeEnabled,
     SettingId::LoadWhileMoving,
     SettingId::SwapInput,
@@ -152,8 +151,8 @@ impl SettingsState {
     pub fn new() -> Self {
         Self {
             selected: 0,
-            // Audio holds the level meters, so it starts unfolded
-            open: HashSet::from([SettingId::GroupAudio]),
+            // Everything starts folded
+            open: HashSet::new(),
             editing: false,
             return_to: View::Deck,
         }
@@ -276,7 +275,7 @@ impl NeowaxApp {
             SettingId::GroupAudio => "Audio",
             SettingId::GroupSystem => "System",
             SettingId::GroupDisplay => "Display",
-            SettingId::GroupPitch => "Pitch",
+            SettingId::GroupDebug => "Debug",
             SettingId::InputDevice => "Input device",
             SettingId::OutputDevice => "Output device",
             SettingId::Library => "Music library",
@@ -530,7 +529,10 @@ impl NeowaxApp {
                     SettingId::WaveformWindow,
                 ],
             ),
-            (SettingId::GroupPitch, &[SettingId::PitchPlot]),
+            (
+                SettingId::GroupDebug,
+                &[SettingId::Meters, SettingId::PitchPlot],
+            ),
         ];
         for (group, children) in groups {
             rows.push(Row::new(group, RowKind::Group, Self::label(group)));
