@@ -41,6 +41,7 @@ pub enum SettingId {
     Meters,
     SwapInput,
     TimecodeEnabled,
+    LoadWhileMoving,
     GroupAudio,
     GroupSystem,
     GroupDisplay,
@@ -81,6 +82,7 @@ const RESTART_SETTINGS: &[SettingId] = &[
 const AUDIO_ROWS: &[SettingId] = &[
     SettingId::Meters,
     SettingId::TimecodeEnabled,
+    SettingId::LoadWhileMoving,
     SettingId::SwapInput,
     SettingId::InputDevice,
     SettingId::OutputDevice,
@@ -270,6 +272,7 @@ impl NeowaxApp {
             SettingId::OnlineUpdates => "Online update check",
             SettingId::SwapInput => "Swap input L/R",
             SettingId::TimecodeEnabled => "Timecode control",
+            SettingId::LoadWhileMoving => "Load while record moves",
             SettingId::GroupAudio => "Audio",
             SettingId::GroupSystem => "System",
             SettingId::GroupDisplay => "Display",
@@ -309,6 +312,7 @@ impl NeowaxApp {
             SettingId::InputDevice => s.input_device.clone(),
             SettingId::OutputDevice => s.output_device.clone(),
             SettingId::OnlineUpdates => on_off(s.online_updates).to_string(),
+            SettingId::LoadWhileMoving => on_off(s.load_while_moving).to_string(),
             SettingId::Library => s
                 .library
                 .as_ref()
@@ -425,6 +429,9 @@ impl NeowaxApp {
             }
             SettingId::Phono => self.config.phono = !self.config.phono,
             SettingId::WaveformZoom => self.config.waveform_zoom = !self.config.waveform_zoom,
+            SettingId::LoadWhileMoving => {
+                self.config.load_while_moving = !self.config.load_while_moving
+            }
             SettingId::OnlineUpdates => {
                 self.config.online_updates = !self.config.online_updates;
                 // Turning it on checks right away; turning it off forgets the result
@@ -540,6 +547,7 @@ impl NeowaxApp {
                         | SettingId::SwapInput
                         | SettingId::TimecodeEnabled
                         | SettingId::WaveformZoom
+                        | SettingId::LoadWhileMoving
                         | SettingId::OnlineUpdates => RowKind::Toggle,
                         SettingId::OnlineCheck => RowKind::Action,
                         SettingId::PitchPlot | SettingId::Meters => RowKind::Display,

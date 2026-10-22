@@ -15,6 +15,8 @@ pub struct Settings {
     pub accent: String,
     /// Swap left/right of the timecode input
     pub swap_input: bool,
+    /// Allow loading a track while the record is still moving (otherwise stop it first)
+    pub load_while_moving: bool,
     /// Show a scrolling close-up under a small overview of the track
     pub waveform_zoom: bool,
     /// Seconds of track the close-up shows (see `WAVEFORM_WINDOWS`)
@@ -73,6 +75,7 @@ impl Default for Settings {
             accent: "Amber".to_string(),
             swap_input: false,
             brightness: 100,
+            load_while_moving: false,
             waveform_zoom: true,
             waveform_window: 16,
             timecode_enabled: true,

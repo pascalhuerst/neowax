@@ -365,6 +365,12 @@ impl NeowaxApp {
             && self.deck_state.get_pitch().abs() > 0.01
     }
 
+    /// Loading a track is refused while the record is moving, unless the
+    /// user allowed it in the settings.
+    fn track_load_blocked(&self) -> bool {
+        !self.config.load_while_moving && self.is_deck_active()
+    }
+
     fn rescan_library(&mut self) {
         let Some(dir) = &self.library_dir else {
             return;
@@ -1174,7 +1180,7 @@ impl NeowaxApp {
                                 let is_current = self.current_track_path.as_ref() == Some(path);
                                 if is_current {
                                     self.view = View::Deck;
-                                } else if self.is_deck_active() {
+                                } else if self.track_load_blocked() {
                                     self.status_message = "Stop the deck first!".to_string();
                                     self.status_timer = 2.0;
                                 } else if !self.loading {
@@ -1262,7 +1268,7 @@ impl eframe::App for NeowaxApp {
                             5 => self.open_settings(),
                             3 => self.view = View::Deck,
                             4 => self.toggle_selected_folder(),
-                            1 if !self.is_deck_active() && !self.loading => {
+                            1 if !self.track_load_blocked() && !self.loading => {
                                 self.load_selected_track();
                             }
                             _ => {}

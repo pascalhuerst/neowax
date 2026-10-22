@@ -110,6 +110,7 @@ The file is plain TOML and can be edited by hand:
 ```toml
 accent = "Cyan"
 brightness = 100   # percent, 10-100
+load_while_moving = false   # true: allow loading a track while the record still moves
 waveform_zoom = true   # scrolling close-up under a small overview
 waveform_window = 16   # seconds shown in the close-up (8, 16 or 32)
 swap_input = false
