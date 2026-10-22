@@ -14,8 +14,8 @@ pub fn prioritize_thread() {
         let param = sched_param { sched_priority: 80 };
 
         if sched_setscheduler(CALLING_THREAD, SCHED_FIFO, &param) != 0 {
-            eprintln!(
-                "Could not set thread priority - consider running:\n  sudo setcap 'cap_sys_nice=eip' <application>"
+            tracing::warn!(
+                "Could not set thread priority - consider running: sudo setcap 'cap_sys_nice=eip' <application>"
             );
         }
     }
@@ -29,7 +29,7 @@ pub fn set_thread_affinity(core_id: usize) {
         CPU_SET(core_id, &mut set);
 
         if sched_setaffinity(CALLING_THREAD, std::mem::size_of::<cpu_set_t>(), &set) != 0 {
-            eprintln!("Could not set thread affinity");
+            tracing::warn!("Could not set thread affinity");
         }
     }
 }
