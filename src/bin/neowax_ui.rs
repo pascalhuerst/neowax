@@ -1,8 +1,11 @@
+#[path = "neowax_ui/log_view.rs"]
+mod log_view;
 #[path = "neowax_ui/settings_panel.rs"]
 mod settings_panel;
 
 use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
+use log_view::LogsState;
 use neowax::audio::{DeckState, Engine, Track, TrackCommand, WaveformData};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
 use neowax::online::{self, OnlineRelease};
@@ -138,6 +141,7 @@ enum View {
     Deck,
     Library,
     Settings,
+    Logs,
     Update,
 }
 
@@ -257,6 +261,9 @@ struct NeowaxApp {
     status_message: String,
     status_timer: f64,
 
+    // Log viewer (Settings > Debug)
+    logs: LogsState,
+
     // Self-update installer state (opened from the settings panel)
     update: Option<UpdateState>,
     restart_requested: Arc<AtomicBool>,
@@ -340,6 +347,7 @@ impl NeowaxApp {
             meters: [0.0; 4],
             reverse: ReverseDetector::new(),
             settings: SettingsState::new(),
+            logs: LogsState::new(),
             accent_index: 0,
             accent: Accent::default(),
             config,
@@ -1241,6 +1249,10 @@ impl NeowaxApp {
                 }
             }
 
+            if self.view == View::Logs {
+                self.scroll_logs(up, down);
+            }
+
             if self.view == View::Update {
                 if let Some(state) = self.update.as_mut() {
                     if matches!(state.phase, UpdatePhase::Confirm)
@@ -1275,6 +1287,7 @@ impl NeowaxApp {
                     }
                 }
                 View::Settings => self.activate_selected_setting(),
+                View::Logs => self.view = View::Settings,
                 View::Deck => {
                     // Button in deck view → open library
                     self.view = View::Library;
@@ -1391,6 +1404,7 @@ impl eframe::App for NeowaxApp {
                 match self.view {
                     View::Deck => self.draw_deck_view(ui),
                     View::Update => self.draw_update_view(ui),
+                    View::Logs => self.draw_logs_view(ui),
                     View::Settings => {
                         if let Some(idx) = self.draw_settings_view(ui) {
                             self.tap_setting(idx);
@@ -1427,7 +1441,15 @@ impl eframe::App for NeowaxApp {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    tracing_subscriber::fmt::init();
+    // Log to stderr (the journal under systemd) and keep a copy for the log
+    // viewer. Colour codes only on a terminal: elsewhere they would make
+    // journalctl hide the lines.
+    tracing_subscriber::fmt()
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .with_writer(neowax::logbuf::TeeMakeWriter::new(
+            neowax::logbuf::LogBuffer::global().clone(),
+        ))
+        .init();
 
     let args = Args::parse();
     if args.check_args {

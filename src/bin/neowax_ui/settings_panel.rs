@@ -46,6 +46,7 @@ pub enum SettingId {
     GroupSystem,
     GroupDisplay,
     GroupDebug,
+    ShowLogs,
     PitchPlot,
     Brightness,
     WaveformZoom,
@@ -286,6 +287,7 @@ impl NeowaxApp {
             SettingId::GroupSystem => "System",
             SettingId::GroupDisplay => "Display",
             SettingId::GroupDebug => "Debug",
+            SettingId::ShowLogs => "Show log (this run)",
             SettingId::InputDevice => "Input device",
             SettingId::OutputDevice => "Output device",
             SettingId::Library => "Music library",
@@ -549,7 +551,7 @@ impl NeowaxApp {
             ),
             (
                 SettingId::GroupDebug,
-                &[SettingId::Meters, SettingId::PitchPlot],
+                &[SettingId::ShowLogs, SettingId::Meters, SettingId::PitchPlot],
             ),
         ];
         for (group, children) in groups {
@@ -569,7 +571,7 @@ impl NeowaxApp {
                         | SettingId::WaveformZoom
                         | SettingId::LoadWhileMoving
                         | SettingId::OnlineUpdates => RowKind::Toggle,
-                        SettingId::OnlineCheck => RowKind::Action,
+                        SettingId::OnlineCheck | SettingId::ShowLogs => RowKind::Action,
                         SettingId::PitchPlot | SettingId::Meters => RowKind::Display,
                         _ => RowKind::Choice,
                     };
@@ -748,6 +750,7 @@ impl NeowaxApp {
                 }
             }
             SettingId::OnlineCheck => self.start_online_check(),
+            SettingId::ShowLogs => self.open_logs(),
             SettingId::OnlineUpdate => {
                 if self.is_deck_active() {
                     self.flash("Stop the deck first!");
