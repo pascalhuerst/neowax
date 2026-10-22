@@ -76,6 +76,7 @@ neowax-ui
 | `--library, --crate <path>` | | Directory to scan for audio files (can also be chosen in Settings) |
 | `--geometry <WxH>` | | Window size (e.g. `800x480`) |
 | `--no-decor` | | Disable window decorations |
+| `--fullscreen` | | Start fullscreen (try this under a kiosk compositor if the window doesn't fill the screen) |
 | `--speed <multiplier>` | 1.0 | Vinyl speed multiplier |
 | `--phono` | | Enable phono-level input |
 | `--no-timecode` | | Play tracks directly instead of following the timecode: selecting a track starts it, selecting another replaces it |

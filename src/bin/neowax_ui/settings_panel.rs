@@ -886,6 +886,11 @@ impl NeowaxApp {
                 );
                 ui.label(RichText::new(&self.os_version).color(info_color).size(14.0));
                 ui.label(
+                    RichText::new(&self.window_info)
+                        .color(info_color)
+                        .size(14.0),
+                );
+                ui.label(
                     RichText::new(format!(
                         "CPUs: {} (isolated: {})",
                         cpu_choices().len(),

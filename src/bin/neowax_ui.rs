@@ -90,6 +90,10 @@ struct Args {
     #[arg(long)]
     no_decor: bool,
 
+    /// Start fullscreen (for kiosk use if the window doesn't fill the screen)
+    #[arg(long)]
+    fullscreen: bool,
+
     /// Vinyl speed multiplier (default: 1.0). Overrides the settings file.
     #[arg(long)]
     speed: Option<f64>,
@@ -239,6 +243,8 @@ struct NeowaxApp {
     /// Close the window on the next frame (after "Apply & restart")
     close_requested: bool,
     os_version: String,
+    /// Window and screen size as the compositor reports them, for diagnostics
+    window_info: String,
     /// Cores reserved with isolcpus= (shown next to the CPU settings)
     isolated_cpus: Vec<usize>,
     /// Best neowax .deb found while scanning the library
@@ -343,6 +349,7 @@ impl NeowaxApp {
             locked,
             close_requested: false,
             os_version: sysinfo::os_version(),
+            window_info: String::new(),
             isolated_cpus: sysinfo::isolated_cpus(),
             installed_version: installed_version.clone(),
             online: OnlineState::Idle,
@@ -370,6 +377,44 @@ impl NeowaxApp {
 
     /// Is the vinyl driving playback right now? Without timecode a playing
     /// track is never "active": selecting another one simply replaces it.
+    /// Remember (and log, when it changes) how big the window really is.
+    fn track_window_size(&mut self, ctx: &egui::Context) {
+        let info = Self::describe_window(ctx);
+        if info != self.window_info {
+            tracing::info!("{}", info);
+            self.window_info = info;
+        }
+    }
+
+    /// e.g. "Window 800x480 px, screen 800x480 px, scale 1.00, fullscreen"
+    fn describe_window(ctx: &egui::Context) -> String {
+        let scale = ctx.pixels_per_point();
+        let (inner, monitor, maximized, fullscreen) = ctx.input(|i| {
+            let v = i.viewport();
+            (
+                v.inner_rect
+                    .map(|r| r.size())
+                    .unwrap_or(i.screen_rect().size()),
+                v.monitor_size,
+                v.maximized.unwrap_or(false),
+                v.fullscreen.unwrap_or(false),
+            )
+        });
+        let px = |points: f32| (points * scale).round() as u32;
+        let mut text = format!("Window {}x{} px", px(inner.x), px(inner.y));
+        match monitor {
+            Some(m) => text.push_str(&format!(", screen {}x{} px", px(m.x), px(m.y))),
+            None => text.push_str(", screen size unknown"),
+        }
+        text.push_str(&format!(", scale {scale:.2}"));
+        if fullscreen {
+            text.push_str(", fullscreen");
+        } else if maximized {
+            text.push_str(", maximized");
+        }
+        text
+    }
+
     fn is_deck_active(&self) -> bool {
         self.deck_state.timecode_enabled.load(Ordering::Relaxed)
             && self.deck_state.get_pitch().abs() > 0.01
@@ -1271,6 +1316,7 @@ impl eframe::App for NeowaxApp {
         ctx.set_visuals(egui::Visuals::dark());
 
         self.check_loaded_track();
+        self.track_window_size(ctx);
         self.check_update_progress(ctx);
         self.check_online_progress();
         self.update_from_engine(ctx.input(|i| i.predicted_dt));
@@ -1525,6 +1571,9 @@ fn main() -> Result<(), eframe::Error> {
 
     if args.no_decor {
         viewport = viewport.with_decorations(false);
+    }
+    if args.fullscreen {
+        viewport = viewport.with_fullscreen(true);
     }
 
     let options = eframe::NativeOptions {
