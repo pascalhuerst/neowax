@@ -16,7 +16,7 @@
 //! shown greyed out and can't be changed.
 
 use super::*;
-use neowax::audio::list_alsa_devices;
+use neowax::audio::{check_device, list_alsa_devices, DeviceUse};
 use neowax::settings::{
     library_candidates, BRIGHTNESS_LEVELS, CAPTURE_BUFFERS, PLAYBACK_BUFFERS, SAMPLE_RATES, SPEEDS,
     WAVEFORM_WINDOWS,
@@ -206,6 +206,14 @@ fn setting_key(id: SettingId) -> Option<&'static str> {
     })
 }
 
+/// The device name, marked when it was found unusable.
+fn device_text(name: &str, problem: Option<&String>, locked: bool) -> String {
+    match problem {
+        Some(_) if !locked => format!("{name} (unavailable)"),
+        _ => name.to_string(),
+    }
+}
+
 fn on_off(on: bool) -> &'static str {
     if on {
         "on"
@@ -323,8 +331,16 @@ impl NeowaxApp {
             SettingId::TimecodeEnabled => {
                 on_off(self.deck_state.timecode_enabled.load(Ordering::Relaxed)).to_string()
             }
-            SettingId::InputDevice => s.input_device.clone(),
-            SettingId::OutputDevice => s.output_device.clone(),
+            SettingId::InputDevice => device_text(
+                &s.input_device,
+                self.input_problem.as_ref(),
+                self.is_locked(id),
+            ),
+            SettingId::OutputDevice => device_text(
+                &s.output_device,
+                self.output_problem.as_ref(),
+                self.is_locked(id),
+            ),
             SettingId::OnlineUpdates => on_off(s.online_updates).to_string(),
             SettingId::LoadWhileMoving => on_off(s.load_while_moving).to_string(),
             SettingId::Library => s
@@ -393,10 +409,12 @@ impl NeowaxApp {
                 return;
             }
             SettingId::InputDevice => {
-                c.input_device = cycle_string(list_alsa_devices(), &c.input_device, delta)
+                c.input_device = cycle_string(list_alsa_devices(), &c.input_device, delta);
+                self.input_problem = self.vet_device(DeviceUse::Capture);
             }
             SettingId::OutputDevice => {
-                c.output_device = cycle_string(list_alsa_devices(), &c.output_device, delta)
+                c.output_device = cycle_string(list_alsa_devices(), &c.output_device, delta);
+                self.output_problem = self.vet_device(DeviceUse::Playback);
             }
             SettingId::Library => {
                 let candidates = library_candidates()
@@ -440,6 +458,35 @@ impl NeowaxApp {
             _ => return,
         }
         self.config_dirty = true;
+    }
+
+    /// Try to open the chosen device, so an unusable one is flagged right away
+    /// instead of failing at the next start. Says why in a message.
+    fn vet_device(&mut self, usage: DeviceUse) -> Option<String> {
+        let (label, name) = match usage {
+            DeviceUse::Capture => ("Input", self.config.input_device.clone()),
+            DeviceUse::Playback => ("Output", self.config.output_device.clone()),
+        };
+        let problem = check_device(&name, usage).err();
+        if let Some(reason) = &problem {
+            self.flash(format!("{label} device {name}: {reason}"));
+        }
+        problem
+    }
+
+    /// A message if a saved audio device is known to be unusable.
+    fn unusable_device_message(&self) -> Option<String> {
+        let input = self
+            .input_problem
+            .as_ref()
+            .map(|reason| format!("Input device {}: {reason}", self.config.input_device));
+        let output = self
+            .output_problem
+            .as_ref()
+            .map(|reason| format!("Output device {}: {reason}", self.config.output_device));
+        input
+            .or(output)
+            .map(|m| format!("{m}. Pick another device."))
     }
 
     fn toggle_setting(&mut self, id: SettingId) {
@@ -767,6 +814,9 @@ impl NeowaxApp {
             SettingId::Apply => {
                 if self.is_deck_active() {
                     self.flash("Stop the deck first!");
+                } else if let Some(problem) = self.unusable_device_message() {
+                    // Restarting into a device that can't be opened would just fail again
+                    self.flash(problem);
                 } else {
                     // The settings are already saved; restarting picks them up
                     self.save_config_if_dirty();
@@ -828,6 +878,7 @@ impl NeowaxApp {
         let mut clicked = None;
         let mut index = 0;
 
+        self.draw_audio_banner(ui);
         ui.label(
             RichText::new("Settings")
                 .color(self.accent.bright())

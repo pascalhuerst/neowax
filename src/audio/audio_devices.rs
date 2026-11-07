@@ -1,6 +1,6 @@
 use alsa::pcm::{Access, Format, HwParams};
 use alsa::{Direction, PCM};
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 /// Default playback buffer size in frames.
 /// 256 frames at 48kHz = ~5.3ms latency.
@@ -87,24 +87,30 @@ pub fn configure_audio_devices(settings: &AlsaSettings) -> Result<(PCM, PCM, usi
         .unwrap_or(DEFAULT_PLAYBACK_BUFFER);
 
     tracing::info!("Configuring capture: {}", settings.input_device);
-    let capture = PCM::new(&settings.input_device, Direction::Capture, false)?;
+    let capture = PCM::new(&settings.input_device, Direction::Capture, false)
+        .map_err(|e| anyhow::anyhow!("{}", describe_open_error(&e)))
+        .with_context(|| format!("Input device {}", settings.input_device))?;
     configure_pcm(
         &capture,
         "Capture",
         settings.num_input_channels,
         settings.sample_rate,
         cap_buffer,
-    )?;
+    )
+    .with_context(|| format!("Input device {}", settings.input_device))?;
 
     tracing::info!("Configuring playback: {}", settings.output_device);
-    let playback = PCM::new(&settings.output_device, Direction::Playback, false)?;
+    let playback = PCM::new(&settings.output_device, Direction::Playback, false)
+        .map_err(|e| anyhow::anyhow!("{}", describe_open_error(&e)))
+        .with_context(|| format!("Output device {}", settings.output_device))?;
     configure_pcm(
         &playback,
         "Playback",
         settings.num_output_channels,
         settings.sample_rate,
         pb_buffer,
-    )?;
+    )
+    .with_context(|| format!("Output device {}", settings.output_device))?;
 
     let buffer_size = {
         let hwp = capture.hw_params_current()?;
@@ -128,4 +134,62 @@ pub fn list_alsa_devices() -> Vec<String> {
         }
     }
     devices
+}
+
+/// Which way a sound device is used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceUse {
+    Capture,
+    Playback,
+}
+
+/// Can `name` be opened for `usage`? Used to vet a choice before saving it.
+/// A device that is merely busy (our own engine has it open) counts as fine:
+/// that is not the same as broken. Returns the reason otherwise.
+pub fn check_device(name: &str, usage: DeviceUse) -> Result<(), String> {
+    let direction = match usage {
+        DeviceUse::Capture => Direction::Capture,
+        DeviceUse::Playback => Direction::Playback,
+    };
+    // Non-blocking, so a device in use fails immediately instead of waiting
+    match PCM::new(name, direction, true) {
+        Ok(_) => Ok(()),
+        Err(e) if e.errno() == libc::EBUSY => Ok(()),
+        Err(e) => Err(describe_open_error(&e)),
+    }
+}
+
+/// A short, readable reason for a failed `snd_pcm_open`.
+fn describe_open_error(error: &alsa::Error) -> String {
+    describe_errno(error.errno())
+}
+
+fn describe_errno(errno: i32) -> String {
+    match errno {
+        libc::ENOENT | libc::ENODEV => "no such sound device".to_string(),
+        libc::EACCES | libc::EPERM => "permission denied".to_string(),
+        libc::EBUSY => "device busy".to_string(),
+        // The kernel's internal "not supported", e.g. an HDMI port with nothing connected
+        524 | libc::EOPNOTSUPP => "not supported (nothing connected?)".to_string(),
+        other => format!("cannot be opened (error {other})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_are_described_readably() {
+        assert_eq!(describe_errno(libc::ENOENT), "no such sound device");
+        assert!(describe_errno(524).starts_with("not supported"));
+        assert!(describe_errno(12345).contains("12345"));
+    }
+
+    #[test]
+    fn a_device_that_does_not_exist_is_reported() {
+        let result = check_device("neowax_no_such_card", DeviceUse::Playback);
+        assert!(result.is_err(), "{result:?}");
+        assert!(check_device("neowax_no_such_card", DeviceUse::Capture).is_err());
+    }
 }

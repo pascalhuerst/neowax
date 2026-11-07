@@ -3,9 +3,10 @@ use super::player::{Player, TimecodeState};
 use super::track::Track;
 use crate::timecode::{TimecodeDef, Timecoder};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 /// Commands sent from the UI to the audio thread
 pub enum TrackCommand {
@@ -88,6 +89,11 @@ pub struct DeckState {
     pub reset_timecoder: AtomicBool,
     /// Whether the realtime loop is running
     pub running: AtomicBool,
+    /// Why the audio isn't running (device missing, wrong choice, ...); `None`
+    /// while it works. The engine keeps retrying, see `Engine::spawn`.
+    audio_error: Mutex<Option<String>>,
+    /// Incremented every time the audio threads (re)start
+    pub generation: AtomicU32,
     /// Swap left/right of the captured timecode signal (for crossed cabling)
     pub swap_input: AtomicBool,
     /// Follow the timecode. When off, a loaded track plays by itself from the start.
@@ -116,12 +122,25 @@ impl DeckState {
             valid_counter: AtomicU32::new(0),
             reset_timecoder: AtomicBool::new(false),
             running: AtomicBool::new(false),
+            audio_error: Mutex::new(None),
+            generation: AtomicU32::new(0),
             swap_input: AtomicBool::new(false),
             timecode_enabled: AtomicBool::new(true),
             monitor: Mutex::new(Vec::new()),
             input_peak: [AtomicU32::new(0), AtomicU32::new(0)],
             output_peak: [AtomicU32::new(0), AtomicU32::new(0)],
         }
+    }
+
+    pub fn audio_error(&self) -> Option<String> {
+        self.audio_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_audio_error(&self, error: Option<String>) {
+        *self.audio_error.lock().unwrap_or_else(|e| e.into_inner()) = error;
     }
 
     /// Peak levels since the last call, as `[in L, in R, out L, out R]`
@@ -158,6 +177,7 @@ impl DeckState {
     }
 }
 
+#[derive(Clone)]
 pub struct Engine {
     pub state: Arc<DeckState>,
     input_device: String,
@@ -166,6 +186,27 @@ pub struct Engine {
     buffer_size: Option<u32>,
     capture_buffer_size: Option<u32>,
 }
+
+/// What the audio threads need to know besides the devices.
+#[derive(Clone, Debug)]
+pub struct EngineConfig {
+    pub timecode: String,
+    pub speed: f64,
+    pub phono: bool,
+    pub capture_cpu: usize,
+    pub playback_cpu: usize,
+}
+
+/// Opened and prepared sound devices, ready to hand to the audio threads.
+struct OpenedDevices {
+    input: alsa::PCM,
+    output: alsa::PCM,
+    capture_period: usize,
+    playback_period: usize,
+}
+
+/// How long to wait before trying the sound devices again.
+const RETRY_INTERVAL: Duration = Duration::from_secs(3);
 
 impl Engine {
     pub fn new(input_device: String, output_device: String, sample_rate: u32) -> Self {
@@ -187,128 +228,235 @@ impl Engine {
         self.capture_buffer_size = Some(size);
     }
 
-    /// Start the audio engine with separate capture and playback threads.
+    /// Start the audio engine on a supervisor thread and return its handle.
     ///
-    /// Returns handles for both threads and a sender for loading new tracks.
-    #[allow(clippy::too_many_arguments)]
-    pub fn run(
+    /// The supervisor opens the sound devices and runs the capture and playback
+    /// threads. It never gives up: if a device can't be opened (a USB card that
+    /// shows up late, a wrong choice in the settings) the reason is published in
+    /// `DeckState::audio_error` and it tries again every few seconds, so the
+    /// app stays usable and the audio starts by itself once the device works.
+    /// Track commands wait in `track_rx` until then. It ends once `running`
+    /// is cleared, after the audio threads have stopped and released the devices.
+    pub fn spawn(
         &self,
         running: Arc<AtomicBool>,
-        initial_track: Option<Arc<Track>>,
-        timecode_name: &str,
-        speed: f64,
-        phono: bool,
-        capture_cpu: usize,
-        playback_cpu: usize,
+        track_rx: mpsc::Receiver<TrackCommand>,
+        config: EngineConfig,
+    ) -> std::thread::JoinHandle<()> {
+        let engine = self.clone();
+        std::thread::spawn(move || engine.supervise(running, track_rx, config))
+    }
+
+    fn supervise(
+        &self,
+        running: Arc<AtomicBool>,
+        mut track_rx: mpsc::Receiver<TrackCommand>,
+        config: EngineConfig,
+    ) {
+        let state = &self.state;
+        let mut timecoder: Option<Timecoder> = None;
+        let mut last_error = String::new();
+
+        while running.load(Ordering::Relaxed) {
+            // Building the timecode table takes seconds; do it once and keep it
+            let tc = match timecoder.take() {
+                Some(mut tc) => {
+                    tc.reset();
+                    tc
+                }
+                None => match self.build_timecoder(&config) {
+                    Ok(tc) => tc,
+                    Err(e) => {
+                        self.report_failure(&mut last_error, format!("{e:#}"));
+                        sleep_while(&running, RETRY_INTERVAL);
+                        continue;
+                    }
+                },
+            };
+
+            let devices = match self.open_devices() {
+                Ok(devices) => devices,
+                Err(e) => {
+                    self.report_failure(&mut last_error, format!("{e:#}"));
+                    timecoder = Some(tc);
+                    sleep_while(&running, RETRY_INTERVAL);
+                    continue;
+                }
+            };
+
+            last_error.clear();
+            state.set_audio_error(None);
+            state.generation.fetch_add(1, Ordering::SeqCst);
+            tracing::info!("Audio started");
+
+            let run = Arc::new(AtomicBool::new(true));
+            let (capture, playback) =
+                self.start_threads(devices, tc, track_rx, &config, run.clone());
+
+            // Wait until both threads are done; either one ending (a device
+            // error) stops the other through `run`.
+            while !(capture.is_finished() && playback.is_finished()) {
+                if !running.load(Ordering::Relaxed) {
+                    run.store(false, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            timecoder = capture.join().ok();
+            match playback.join() {
+                Ok(rx) => track_rx = rx,
+                Err(_) => {
+                    // The track channel went down with the thread; nothing to reconnect
+                    self.report_failure(&mut last_error, "audio thread crashed".to_string());
+                    return;
+                }
+            }
+
+            if running.load(Ordering::Relaxed) {
+                tracing::warn!("Audio stopped, trying again");
+                sleep_while(&running, RETRY_INTERVAL);
+            }
+        }
+    }
+
+    /// Publish a failure for the UI; log it only when it changes, not on every retry.
+    fn report_failure(&self, last: &mut String, message: String) {
+        if *last != message {
+            tracing::error!("Audio not running: {}", message);
+            *last = message.clone();
+        }
+        self.state.set_audio_error(Some(message));
+    }
+
+    fn build_timecoder(&self, config: &EngineConfig) -> Result<Timecoder> {
+        tracing::info!("Building timecode LUT for '{}'...", config.timecode);
+        let def = TimecodeDef::find_definition(&config.timecode)
+            .ok_or_else(|| anyhow::anyhow!("unknown timecode '{}'", config.timecode))?;
+        Ok(Timecoder::new(
+            def,
+            config.speed,
+            self.sample_rate,
+            config.phono,
+        ))
+    }
+
+    fn open_devices(&self) -> Result<OpenedDevices> {
+        let alsa_settings = AlsaSettings {
+            input_device: self.input_device.clone(),
+            output_device: self.output_device.clone(),
+            num_input_channels: 2,
+            num_output_channels: 2,
+            sample_rate: self.sample_rate,
+            buffer_size: self.buffer_size,
+            capture_buffer_size: self.capture_buffer_size,
+            period_size: None,
+        };
+        let (input, output, _) = configure_audio_devices(&alsa_settings)?;
+
+        let capture_period = input
+            .hw_params_current()
+            .and_then(|p| p.get_period_size())
+            .context("reading the capture period size")? as usize;
+        let playback_period = output
+            .hw_params_current()
+            .and_then(|p| p.get_period_size())
+            .context("reading the playback period size")? as usize;
+
+        input.prepare().context("preparing capture")?;
+        output.prepare().context("preparing playback")?;
+        input.start().context("starting capture")?;
+
+        Ok(OpenedDevices {
+            input,
+            output,
+            capture_period,
+            playback_period,
+        })
+    }
+
+    /// Run capture (timecode decoding) and playback on their own threads. Each
+    /// hands back what it was given (the timecoder, the track channel) when it
+    /// ends, so a restart loses neither.
+    fn start_threads(
+        &self,
+        devices: OpenedDevices,
+        timecoder: Timecoder,
+        track_rx: mpsc::Receiver<TrackCommand>,
+        config: &EngineConfig,
+        run: Arc<AtomicBool>,
     ) -> (
-        std::thread::JoinHandle<()>,
-        std::thread::JoinHandle<()>,
-        mpsc::Sender<TrackCommand>,
+        std::thread::JoinHandle<Timecoder>,
+        std::thread::JoinHandle<mpsc::Receiver<TrackCommand>>,
     ) {
         let state = self.state.clone();
         let sample_rate = self.sample_rate;
-        let input_device = self.input_device.clone();
-        let output_device = self.output_device.clone();
-        let timecode_name = timecode_name.to_string();
-        let buffer_size = self.buffer_size;
-        let capture_buffer_size = self.capture_buffer_size;
-
-        let (track_tx, track_rx) = mpsc::channel::<TrackCommand>();
-
-        // Shared between capture and playback threads
-        let snapshot = Arc::new(TimecodeSnapshot::new());
-
-        // Build timecoder on main thread to get constants before spawning
-        tracing::info!("Building timecode LUT for '{}'...", timecode_name);
-        let def = TimecodeDef::find_definition(&timecode_name)
-            .unwrap_or_else(|| panic!("Unknown timecode: {}", timecode_name));
-        let timecoder = Timecoder::new(def, speed, sample_rate, phono);
+        let (capture_cpu, playback_cpu) = (config.capture_cpu, config.playback_cpu);
         let tc_safe = timecoder.get_safe();
         let tc_resolution = timecoder.get_resolution();
 
-        // Configure ALSA devices on main thread (avoids race conditions)
-        let alsa_settings = AlsaSettings {
-            input_device: input_device.clone(),
-            output_device: output_device.clone(),
-            num_input_channels: 2,
-            num_output_channels: 2,
-            sample_rate,
-            buffer_size,
-            capture_buffer_size,
-            period_size: None,
-        };
-
-        let (input_pcm, output_pcm, _) =
-            configure_audio_devices(&alsa_settings).expect("Failed to configure audio devices");
-
-        let capture_period = input_pcm
-            .hw_params_current()
-            .expect("capture hw params")
-            .get_period_size()
-            .expect("capture period") as usize;
-        let playback_period = output_pcm
-            .hw_params_current()
-            .expect("playback hw params")
-            .get_period_size()
-            .expect("playback period") as usize;
-
-        input_pcm.prepare().expect("capture prepare");
-        output_pcm.prepare().expect("playback prepare");
-        input_pcm.start().expect("capture start");
-
+        // Shared between capture and playback threads
+        let snapshot = Arc::new(TimecodeSnapshot::new());
         state.running.store(true, Ordering::SeqCst);
 
         // Capture thread: reads timecode audio, decodes position+pitch
-        let cap_snapshot = snapshot.clone();
-        let cap_state = state.clone();
-        let cap_running = running.clone();
-
-        let capture_handle = std::thread::spawn(move || {
+        let (cap_snapshot, cap_state, cap_run) = (snapshot.clone(), state.clone(), run.clone());
+        let capture = std::thread::spawn(move || {
             super::realtime::set_thread_affinity(capture_cpu);
             super::realtime::prioritize_thread();
 
+            let mut timecoder = timecoder;
             if let Err(e) = run_capture_loop(
-                input_pcm,
-                timecoder,
-                capture_period,
+                devices.input,
+                &mut timecoder,
+                devices.capture_period,
                 &cap_snapshot,
                 &cap_state,
-                &cap_running,
+                &cap_run,
             ) {
-                tracing::error!("Capture thread error: {}", e);
+                tracing::error!("Capture thread error: {:#}", e);
+                cap_state.set_audio_error(Some(format!("Audio input stopped: {e:#}")));
             }
+            cap_run.store(false, Ordering::SeqCst);
             cap_state.running.store(false, Ordering::SeqCst);
             tracing::info!("Capture thread stopped");
+            timecoder
         });
 
         // Playback thread: generates audio from track + timecode snapshot
-        let pb_snapshot = snapshot;
-        let pb_state = state;
-        let pb_running = running;
-
-        let playback_handle = std::thread::spawn(move || {
+        let playback = std::thread::spawn(move || {
             super::realtime::set_thread_affinity(playback_cpu);
             super::realtime::prioritize_thread();
 
             if let Err(e) = run_playback_loop(
-                output_pcm,
+                devices.output,
                 sample_rate,
-                playback_period,
-                initial_track,
-                track_rx,
+                devices.playback_period,
+                &track_rx,
                 tc_safe,
                 tc_resolution,
-                &pb_snapshot,
-                &pb_state,
-                &pb_running,
+                &snapshot,
+                &state,
+                &run,
             ) {
-                tracing::error!("Playback thread error: {}", e);
+                tracing::error!("Playback thread error: {:#}", e);
+                state.set_audio_error(Some(format!("Audio output stopped: {e:#}")));
             }
-            pb_state.running.store(false, Ordering::SeqCst);
+            run.store(false, Ordering::SeqCst);
+            state.running.store(false, Ordering::SeqCst);
             tracing::info!("Playback thread stopped");
+            track_rx
         });
 
-        (capture_handle, playback_handle, track_tx)
+        (capture, playback)
+    }
+}
+
+/// Sleep for `total`, but wake early once `running` is cleared.
+fn sleep_while(running: &AtomicBool, total: Duration) {
+    let step = Duration::from_millis(100);
+    let mut slept = Duration::ZERO;
+    while slept < total && running.load(Ordering::Relaxed) {
+        std::thread::sleep(step);
+        slept += step;
     }
 }
 
@@ -325,7 +473,7 @@ fn publish_peaks(peaks: &[AtomicU32; 2], samples: &[i16]) {
 
 fn run_capture_loop(
     input_pcm: alsa::PCM,
-    mut timecoder: Timecoder,
+    timecoder: &mut Timecoder,
     period_size: usize,
     snapshot: &TimecodeSnapshot,
     state: &DeckState,
@@ -364,7 +512,7 @@ fn run_capture_loop(
                 timecoder.submit(&capture_buf[..n * 2]);
 
                 // Publish timecoder state to playback thread
-                snapshot.write(&timecoder);
+                snapshot.write(timecoder);
 
                 // Publish timecoder-side DeckState
                 state
@@ -405,8 +553,7 @@ fn run_playback_loop(
     output_pcm: alsa::PCM,
     sample_rate: u32,
     period_size: usize,
-    initial_track: Option<Arc<Track>>,
-    track_rx: mpsc::Receiver<TrackCommand>,
+    track_rx: &mpsc::Receiver<TrackCommand>,
     tc_safe: u32,
     tc_resolution: f64,
     snapshot: &TimecodeSnapshot,
@@ -414,9 +561,6 @@ fn run_playback_loop(
     running: &AtomicBool,
 ) -> Result<()> {
     let mut player = Player::new(sample_rate);
-    if let Some(t) = initial_track {
-        player.set_track(t);
-    }
 
     let mut playback_buf = vec![0i16; period_size * 2];
 

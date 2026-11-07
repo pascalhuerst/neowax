@@ -6,7 +6,7 @@ mod settings_panel;
 use clap::Parser;
 use eframe::egui::{self, Color32, Frame, Margin, RichText, Rounding};
 use log_view::LogsState;
-use neowax::audio::{DeckState, Engine, Track, TrackCommand, WaveformData};
+use neowax::audio::{DeckState, Engine, EngineConfig, Track, TrackCommand, WaveformData};
 use neowax::library::{self, FlatEntry, FlatEntryKind, LibraryNode};
 use neowax::online::{self, OnlineRelease};
 use neowax::settings::Settings;
@@ -249,6 +249,12 @@ struct NeowaxApp {
     os_version: String,
     /// Window and screen size as the compositor reports them, for diagnostics
     window_info: String,
+    /// Why the saved input / output device can't be opened, if that was found out
+    /// when the user picked it (see `check_device`)
+    input_problem: Option<String>,
+    output_problem: Option<String>,
+    /// The audio engine start this app has seen; a change means it restarted
+    seen_audio_generation: u32,
     /// Cores reserved with isolcpus= (shown next to the CPU settings)
     isolated_cpus: Vec<usize>,
     /// Best neowax .deb found while scanning the library
@@ -358,6 +364,9 @@ impl NeowaxApp {
             close_requested: false,
             os_version: sysinfo::os_version(),
             window_info: String::new(),
+            input_problem: None,
+            output_problem: None,
+            seen_audio_generation: 0,
             isolated_cpus: sysinfo::isolated_cpus(),
             installed_version: installed_version.clone(),
             online: OnlineState::Idle,
@@ -426,6 +435,27 @@ impl NeowaxApp {
     fn is_deck_active(&self) -> bool {
         self.deck_state.timecode_enabled.load(Ordering::Relaxed)
             && self.deck_state.get_pitch().abs() > 0.01
+    }
+
+    /// A red notice while the audio isn't running, with what to do about it.
+    fn draw_audio_banner(&self, ui: &mut egui::Ui) {
+        let Some(error) = self.deck_state.audio_error() else {
+            return;
+        };
+        ui.label(
+            RichText::new(format!("Audio not running: {error}"))
+                .color(CLIP_COLOR)
+                .size(14.0),
+        );
+        ui.label(
+            RichText::new(
+                "Trying again every few seconds. Pick a working device in Settings > Audio \
+                 and use \"Apply changes & restart\".",
+            )
+            .color(Color32::from_rgb(180, 170, 150))
+            .size(12.0),
+        );
+        ui.add_space(SPACER);
     }
 
     /// Loading a track is refused while the record is moving, unless the
@@ -722,6 +752,17 @@ impl NeowaxApp {
     fn update_from_engine(&mut self, dt: f32) {
         self.reverse.update(self.deck_state.get_vinyl_pitch(), dt);
 
+        // The audio threads (re)started. The first start is normal; a later one
+        // means the sound device dropped out, and the track it held is gone.
+        let generation = self.deck_state.generation.load(Ordering::Relaxed);
+        if generation != self.seen_audio_generation {
+            if self.seen_audio_generation != 0 {
+                self.clear_deck();
+                self.flash("Audio restarted: track unloaded");
+            }
+            self.seen_audio_generation = generation;
+        }
+
         let peaks = self.deck_state.take_peaks();
         for (meter, peak) in self.meters.iter_mut().zip(peaks) {
             *meter = peak.max(*meter * METER_DECAY);
@@ -845,6 +886,7 @@ impl NeowaxApp {
     }
 
     fn draw_deck_view(&mut self, ui: &mut egui::Ui) {
+        self.draw_audio_banner(ui);
         let elapsed = self.deck_state.get_elapsed();
         let remaining = self.track_duration - elapsed;
 
@@ -1083,6 +1125,7 @@ impl NeowaxApp {
     fn draw_library_view(&mut self, ui: &mut egui::Ui) -> u8 {
         let mut action = 0u8; // 0=none, 1=load, 2=rescan, 3=back to deck, 4=toggle folder, 5=settings
 
+        self.draw_audio_banner(ui);
         ui.label(
             RichText::new("Library")
                 .color(self.accent.bright())
@@ -1559,14 +1602,20 @@ fn main() -> Result<(), eframe::Error> {
         .timecode_enabled
         .store(startup.timecode_enabled, Ordering::Relaxed);
 
-    let (capture_handle, playback_handle, track_sender) = engine.run(
+    // The audio engine opens the sound devices on its own thread and keeps
+    // retrying if that fails, so the window comes up either way. Tracks
+    // queue up in the channel until the audio runs.
+    let (track_sender, track_receiver) = mpsc::channel::<TrackCommand>();
+    let audio = engine.spawn(
         running.clone(),
-        None,
-        &startup.timecode,
-        startup.speed,
-        startup.phono,
-        startup.capture_cpu,
-        startup.playback_cpu,
+        track_receiver,
+        EngineConfig {
+            timecode: startup.timecode.clone(),
+            speed: startup.speed,
+            phono: startup.phono,
+            capture_cpu: startup.capture_cpu,
+            playback_cpu: startup.playback_cpu,
+        },
     );
 
     let timecode_resolution = TimecodeDef::find_definition(&startup.timecode)
@@ -1610,8 +1659,7 @@ fn main() -> Result<(), eframe::Error> {
     let result = eframe::run_native("neowax", options, Box::new(|_cc| Box::new(app)));
 
     running.store(false, Ordering::SeqCst);
-    capture_handle.join().ok();
-    playback_handle.join().ok();
+    audio.join().ok();
 
     // After a successful update, replace this process with the new binary.
     // Done after joining the audio threads so ALSA devices are released.
