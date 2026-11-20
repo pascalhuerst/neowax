@@ -392,6 +392,17 @@ impl NeowaxApp {
         app
     }
 
+    /// Seconds into the track. Before its start (needle ahead of the calibrated
+    /// point) the track rests at its beginning.
+    fn elapsed_secs(&self) -> f64 {
+        let elapsed = self.deck_state.get_elapsed();
+        if elapsed.is_finite() {
+            elapsed.max(0.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Is the vinyl driving playback right now? Without timecode a playing
     /// track is never "active": selecting another one simply replaces it.
     /// Remember (and log, when it changes) how big the window really is.
@@ -799,11 +810,8 @@ impl NeowaxApp {
             self.signal_quality += (raw_quality - self.signal_quality) * 0.05;
         }
 
-        let elapsed = self.deck_state.get_elapsed();
-        if elapsed.is_finite() && elapsed >= 0.0 {
-            self.waveform
-                .set_position(std::time::Duration::from_secs_f64(elapsed));
-        }
+        self.waveform
+            .set_position(std::time::Duration::from_secs_f64(self.elapsed_secs()));
 
         // Record pitch history (~10s window at 60fps)
         let vinyl_pitch = self.deck_state.get_vinyl_pitch() as f32;
@@ -819,7 +827,7 @@ impl NeowaxApp {
     /// as a mini waveform with the playhead if the screen is tall enough,
     /// otherwise as a progress bar, with the elapsed and remaining time on the sides.
     fn draw_library_status(&mut self, ui: &mut egui::Ui, screen_height: f32) {
-        let elapsed = self.deck_state.get_elapsed();
+        let elapsed = self.elapsed_secs();
         let remaining = self.track_duration - elapsed;
         let mini = screen_height >= MINI_WAVEFORM_MIN_SCREEN && self.waveform.has_data();
         let height = if mini {
@@ -887,7 +895,7 @@ impl NeowaxApp {
 
     fn draw_deck_view(&mut self, ui: &mut egui::Ui) {
         self.draw_audio_banner(ui);
-        let elapsed = self.deck_state.get_elapsed();
+        let elapsed = self.elapsed_secs();
         let remaining = self.track_duration - elapsed;
 
         // Row 1: Spinner + signal bar + track name (tap the name to open the library)

@@ -39,6 +39,8 @@ pub enum SettingId {
     /// One entry of that list (index into `available_updates`)
     UpdateVersion(usize),
     Meters,
+    /// Live readout of the decoded timecode position
+    TimecodeInfo,
     SwapInput,
     TimecodeEnabled,
     LoadWhileMoving,
@@ -313,7 +315,7 @@ impl NeowaxApp {
             SettingId::HideCursor => "Hide mouse pointer",
             SettingId::WaveformZoom => "Zoomed waveform",
             SettingId::WaveformWindow => "Zoom window",
-            SettingId::Meters | SettingId::PitchPlot => "",
+            SettingId::Meters | SettingId::PitchPlot | SettingId::TimecodeInfo => "",
         }
     }
 
@@ -603,7 +605,12 @@ impl NeowaxApp {
             ),
             (
                 SettingId::GroupDebug,
-                &[SettingId::ShowLogs, SettingId::Meters, SettingId::PitchPlot],
+                &[
+                    SettingId::ShowLogs,
+                    SettingId::TimecodeInfo,
+                    SettingId::Meters,
+                    SettingId::PitchPlot,
+                ],
             ),
         ];
         for (group, children) in groups {
@@ -625,7 +632,9 @@ impl NeowaxApp {
                         | SettingId::LoadWhileMoving
                         | SettingId::OnlineUpdates => RowKind::Toggle,
                         SettingId::OnlineCheck | SettingId::ShowLogs => RowKind::Action,
-                        SettingId::PitchPlot | SettingId::Meters => RowKind::Display,
+                        SettingId::PitchPlot | SettingId::Meters | SettingId::TimecodeInfo => {
+                            RowKind::Display
+                        }
                         _ => RowKind::Choice,
                     };
                     let label = if id == SettingId::OnlineCheck {
@@ -660,6 +669,21 @@ impl NeowaxApp {
         );
         row.style = RowStyle::Warning;
         Some(row)
+    }
+
+    /// Where the needle is on the record, as the timecode reports it. Useful to
+    /// find out where a record's coded groove starts: put the needle at its
+    /// outer edge and read the first position.
+    fn timecode_info_text(&self) -> String {
+        let speed = self.deck_state.get_vinyl_pitch();
+        match self.deck_state.get_timecode_pos() {
+            Some(pos) => format!(
+                "Timecode {:7.2} s into the record, speed {:+.2}",
+                pos as f64 / self.timecode_resolution,
+                speed
+            ),
+            None => format!("Timecode: no position, speed {speed:+.2}"),
+        }
     }
 
     fn online_check_text(&self) -> String {
@@ -895,6 +919,15 @@ impl NeowaxApp {
                         SettingId::Meters => {
                             self.draw_meters(ui);
                             ui.add_space(SPACER);
+                            continue;
+                        }
+                        SettingId::TimecodeInfo => {
+                            ui.label(
+                                RichText::new(self.timecode_info_text())
+                                    .monospace()
+                                    .size(13.0)
+                                    .color(Color32::from_rgb(180, 170, 150)),
+                            );
                             continue;
                         }
                         SettingId::PitchPlot => {

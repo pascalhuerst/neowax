@@ -32,6 +32,10 @@ const SYNC_PITCH: f64 = 0.05;
 const SYNC_RC: f64 = 0.05;
 /// Jump straight to timecode position if difference exceeds this (seconds)
 const SKIP_THRESHOLD: f64 = 1.0 / 8.0;
+/// Timecode positions (seconds) this close to the start of the record count as its beginning
+const RECORD_START_ZONE: f64 = 10.0;
+/// No timecode for this long, ending in the start zone, means the needle was put down there
+const NEEDLE_PLACED_GAP: f64 = 0.2;
 /// Base volume level (leaves headroom for pitch > 1.0)
 const VOLUME: f64 = 7.0 / 8.0;
 
@@ -82,6 +86,8 @@ pub struct Player {
     volume: f64,
     /// Calibrate offset on next valid timecode position
     needs_calibration: bool,
+    /// How long the timecode has been missing (seconds)
+    no_position_secs: f64,
     /// Play the track at normal speed from the start, ignoring the timecode
     free_run: bool,
 }
@@ -99,6 +105,7 @@ impl Player {
             sync_pitch: 1.0,
             volume: 0.0,
             needs_calibration: true,
+            no_position_secs: 0.0,
             free_run: false,
         }
     }
@@ -166,6 +173,32 @@ impl Player {
             None => {
                 self.target_position = f64::INFINITY;
             }
+        }
+    }
+
+    /// The needle came down (again) in the first seconds of the record. The start
+    /// of the track was calibrated further in, so the track time here would be
+    /// negative: silence, and no sign of the track coming back. The beginning of
+    /// the record is the beginning of the track: from here on the timecode
+    /// position is the track time (offset 0).
+    ///
+    /// Only after a gap in the timecode (needle lifted, or slid back through the
+    /// uncoded groove before the first position), so a needle resting on its
+    /// cue near the start of the record is left alone, and so is dropping
+    /// further in, where running up to the cue from before it is intended.
+    fn check_record_start(&mut self) {
+        let placed = self.no_position_secs >= NEEDLE_PLACED_GAP;
+        if placed
+            && !self.needs_calibration
+            && self.target_position < RECORD_START_ZONE
+            && self.offset > self.target_position
+        {
+            tracing::info!(
+                "Needle back at the start of the record ({:.2}s): track start was {:.2}s, now 0",
+                self.target_position,
+                self.offset
+            );
+            self.offset = 0.0;
         }
     }
 
@@ -263,9 +296,12 @@ impl Player {
         self.sync_to_state(state);
 
         if self.target_position.is_finite() {
+            self.check_record_start();
             self.retarget();
             self.target_position = f64::INFINITY;
+            self.no_position_secs = 0.0;
         } else {
+            self.no_position_secs += dt;
             self.sync_pitch += dt / (SYNC_RC + dt) * (1.0 - self.sync_pitch);
         }
 
@@ -409,6 +445,120 @@ mod tests {
         player.collect_with_state(&mut buf, period, &state);
         assert!(player.get_elapsed() < 0.02);
         assert!(player.get_effective_pitch() > 0.9);
+    }
+
+    /// A timecode snapshot `secs` into the record, the vinyl moving at normal speed.
+    fn moving_at(secs: f64) -> TimecodeState {
+        TimecodeState {
+            pitch: 1.0,
+            position: Some(((secs * 1000.0) as i32, 0.0)),
+            safe: u32::MAX,
+            resolution: 1000.0,
+        }
+    }
+
+    fn needle_lifted() -> TimecodeState {
+        TimecodeState {
+            pitch: 0.0,
+            position: None,
+            safe: u32::MAX,
+            resolution: 1000.0,
+        }
+    }
+
+    /// Run the player for `secs` (10 ms periods), the needle moving on from record position `from`.
+    /// Returns whether anything audible came out.
+    fn play_from(player: &mut Player, from: f64, secs: f64) -> bool {
+        let period = 441;
+        let mut buf = vec![0i16; period * 2];
+        let mut audible = false;
+        for i in 0..(secs * 100.0) as usize {
+            player.collect_with_state(&mut buf, period, &moving_at(from + i as f64 * 0.01));
+            audible |= buf.iter().any(|&s| s.abs() > 1000);
+        }
+        audible
+    }
+
+    fn lift_for(player: &mut Player, secs: f64) {
+        let mut buf = vec![0i16; 441 * 2];
+        for _ in 0..(secs * 100.0) as usize {
+            player.collect_with_state(&mut buf, 441, &needle_lifted());
+        }
+    }
+
+    /// A player whose track was loaded with the needle `record_secs` into the record.
+    fn loaded_at(record_secs: f64) -> Player {
+        let mut player = Player::new(44100);
+        player.set_track(make_test_track());
+        play_from(&mut player, record_secs, 0.5);
+        player
+    }
+
+    #[test]
+    fn needle_back_at_the_start_of_the_record_restarts_the_track() {
+        // Track start calibrated 30 s into the record
+        let mut player = loaded_at(30.0);
+        assert!((player.offset - 30.0).abs() < 0.05);
+
+        // Lift the needle and put it down at the beginning of the record
+        lift_for(&mut player, 1.0);
+        let audible = play_from(&mut player, 2.0, 1.0);
+
+        assert!(audible, "the track must play, not sit in silence");
+        assert_eq!(player.offset, 0.0, "the record start is the track start");
+        // 2 s into the record + 1 s played = 3 s into the track
+        assert!(
+            (player.get_elapsed() - 3.0).abs() < 0.1,
+            "{}",
+            player.get_elapsed()
+        );
+    }
+
+    #[test]
+    fn a_start_calibrated_inside_the_start_zone_is_also_reset() {
+        // Needle dropped 3 s into the record at load, put back at 0.5 s
+        let mut player = loaded_at(3.0);
+        lift_for(&mut player, 1.0);
+        assert!(play_from(&mut player, 0.5, 1.0));
+        assert_eq!(player.offset, 0.0);
+    }
+
+    #[test]
+    fn dropping_further_in_just_seeks_and_keeps_the_start() {
+        let mut player = loaded_at(30.0);
+        lift_for(&mut player, 1.0);
+        play_from(&mut player, 36.0, 1.0);
+
+        assert!((player.offset - 30.0).abs() < 0.05);
+        assert!(
+            (player.get_elapsed() - 7.0).abs() < 0.2,
+            "{}",
+            player.get_elapsed()
+        );
+    }
+
+    #[test]
+    fn dropping_before_the_start_outside_the_start_zone_keeps_the_cue() {
+        // Running up to the cue from before it is intended: silence until it is reached
+        let mut player = loaded_at(30.0);
+        lift_for(&mut player, 1.0);
+        let audible = play_from(&mut player, 20.0, 1.0);
+
+        assert!((player.offset - 30.0).abs() < 0.05);
+        assert!(!audible);
+        assert!(player.get_elapsed() < 0.0);
+    }
+
+    #[test]
+    fn a_short_dropout_in_the_start_zone_does_not_reset_anything() {
+        let mut player = loaded_at(8.0);
+        lift_for(&mut player, 0.1); // dust, not a needle placed down
+        play_from(&mut player, 7.5, 0.5);
+        assert!(
+            (player.offset - 8.0).abs() < 0.05,
+            "offset {}",
+            player.offset
+        );
     }
 
     #[test]
