@@ -1833,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "neowax"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "alsa",
  "anyhow",
