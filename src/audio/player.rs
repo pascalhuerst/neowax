@@ -32,10 +32,16 @@ const SYNC_PITCH: f64 = 0.05;
 const SYNC_RC: f64 = 0.05;
 /// Jump straight to timecode position if difference exceeds this (seconds)
 const SKIP_THRESHOLD: f64 = 1.0 / 8.0;
-/// Timecode positions (seconds) this close to the start of the record count as its beginning
-const RECORD_START_ZONE: f64 = 10.0;
-/// No timecode for this long, ending in the start zone, means the needle was put down there
-const NEEDLE_PLACED_GAP: f64 = 0.2;
+/// Timecode positions (seconds) this close to the start of the record count as its
+/// beginning. A hand can't place the needle to within a few seconds of groove
+/// (1 s of timecode is about 0.1 mm), and the first position the decoder can
+/// read is already seconds in.
+const RECORD_START_ZONE: f64 = 20.0;
+/// No timecode for this long means the needle was lifted and put down again
+const NEEDLE_LIFT_GAP: f64 = 0.5;
+/// A shorter gap still counts when the needle comes back *behind* the track start
+/// (slid back through the uncoded groove before the first position)
+const SLID_BACK_GAP: f64 = 0.2;
 /// Base volume level (leaves headroom for pitch > 1.0)
 const VOLUME: f64 = 7.0 / 8.0;
 
@@ -176,29 +182,32 @@ impl Player {
         }
     }
 
-    /// The needle came down (again) in the first seconds of the record. The start
-    /// of the track was calibrated further in, so the track time here would be
-    /// negative: silence, and no sign of the track coming back. The beginning of
-    /// the record is the beginning of the track: from here on the timecode
-    /// position is the track time (offset 0).
+    /// The needle came down (again) in the first seconds of the record: the track
+    /// starts from its beginning right where it came down.
     ///
-    /// Only after a gap in the timecode (needle lifted, or slid back through the
-    /// uncoded groove before the first position), so a needle resting on its
-    /// cue near the start of the record is left alone, and so is dropping
-    /// further in, where running up to the cue from before it is intended.
+    /// Without this, a start calibrated further in leaves the track time negative
+    /// (silence, and no sign of the track coming back), and anything fixed to the
+    /// record start would miss the track's beginning, since the first position the
+    /// decoder can read is already seconds in, and a hand can't hit an exact spot.
+    ///
+    /// Only after the needle was lifted (a gap in the timecode), or slid back behind
+    /// the track start through the uncoded groove. A dropout of dust length, or a
+    /// needle resting on its cue, changes nothing, and neither does dropping further
+    /// in, where running up to a cue from before it is intended.
     fn check_record_start(&mut self) {
-        let placed = self.no_position_secs >= NEEDLE_PLACED_GAP;
-        if placed
-            && !self.needs_calibration
-            && self.target_position < RECORD_START_ZONE
-            && self.offset > self.target_position
-        {
+        if self.needs_calibration || self.target_position >= RECORD_START_ZONE {
+            return;
+        }
+        let lifted = self.no_position_secs >= NEEDLE_LIFT_GAP;
+        let slid_back =
+            self.no_position_secs >= SLID_BACK_GAP && self.target_position < self.offset;
+        if lifted || slid_back {
             tracing::info!(
-                "Needle back at the start of the record ({:.2}s): track start was {:.2}s, now 0",
+                "Needle down at {:.2}s in the record's start zone: track starts here (was {:.2}s)",
                 self.target_position,
                 self.offset
             );
-            self.offset = 0.0;
+            self.offset = self.target_position;
         }
     }
 
@@ -500,27 +509,60 @@ mod tests {
         let mut player = loaded_at(30.0);
         assert!((player.offset - 30.0).abs() < 0.05);
 
-        // Lift the needle and put it down at the beginning of the record
+        // Lift the needle and put it down near the beginning of the record
         lift_for(&mut player, 1.0);
-        let audible = play_from(&mut player, 2.0, 1.0);
+        let audible = play_from(&mut player, 4.0, 1.0);
 
         assert!(audible, "the track must play, not sit in silence");
-        assert_eq!(player.offset, 0.0, "the record start is the track start");
-        // 2 s into the record + 1 s played = 3 s into the track
         assert!(
-            (player.get_elapsed() - 3.0).abs() < 0.1,
+            (player.offset - 4.0).abs() < 0.05,
+            "starts where it came down"
+        );
+        // One second played since it came down
+        assert!(
+            (player.get_elapsed() - 1.0).abs() < 0.1,
             "{}",
             player.get_elapsed()
         );
     }
 
     #[test]
-    fn a_start_calibrated_inside_the_start_zone_is_also_reset() {
-        // Needle dropped 3 s into the record at load, put back at 0.5 s
-        let mut player = loaded_at(3.0);
+    fn the_track_starts_where_the_needle_came_down_even_when_that_is_later() {
+        // First calibrated at 4.0 s; put down again at 6.5 s, which is after that
+        // spot. A hand can't land before the first readable position, but the
+        // track must still start from its beginning.
+        let mut player = loaded_at(4.0);
         lift_for(&mut player, 1.0);
-        assert!(play_from(&mut player, 0.5, 1.0));
-        assert_eq!(player.offset, 0.0);
+        assert!(play_from(&mut player, 6.5, 1.0));
+        assert!((player.offset - 6.5).abs() < 0.05, "{}", player.offset);
+        assert!(
+            (player.get_elapsed() - 1.0).abs() < 0.1,
+            "{}",
+            player.get_elapsed()
+        );
+    }
+
+    #[test]
+    fn sliding_back_behind_the_start_through_the_uncoded_groove_restarts_the_track() {
+        let mut player = loaded_at(30.0);
+        lift_for(&mut player, 0.3); // no timecode for a moment, not a full lift
+        assert!(play_from(&mut player, 5.0, 1.0));
+        assert!((player.offset - 5.0).abs() < 0.05, "{}", player.offset);
+    }
+
+    #[test]
+    fn a_dropout_after_the_start_does_not_restart_a_playing_track() {
+        // Playing inside the start zone, then a 0.3 s dropout: not a lifted
+        // needle, so the track carries on where it was
+        let mut player = loaded_at(8.0);
+        play_from(&mut player, 8.5, 4.0);
+        lift_for(&mut player, 0.3);
+        play_from(&mut player, 13.0, 0.5);
+        assert!(
+            (player.offset - 8.0).abs() < 0.05,
+            "offset {}",
+            player.offset
+        );
     }
 
     #[test]
@@ -542,7 +584,7 @@ mod tests {
         // Running up to the cue from before it is intended: silence until it is reached
         let mut player = loaded_at(30.0);
         lift_for(&mut player, 1.0);
-        let audible = play_from(&mut player, 20.0, 1.0);
+        let audible = play_from(&mut player, 25.0, 1.0);
 
         assert!((player.offset - 30.0).abs() < 0.05);
         assert!(!audible);
